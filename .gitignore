@@ -1,0 +1,14 @@
+# Never commit secrets or machine-specific config to a public template
+*.env
+.env*
+auth-profiles.json
+*token*
+*secret*
+*.key
+*.pem
+
+# OS / editor noise
+.DS_Store
+*.swp
+.idea/
+.vscode/

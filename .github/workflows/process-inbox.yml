@@ -1,0 +1,57 @@
+name: Process inbox
+
+# Reads raw notes in inbox/, drafts them into drafts/ (and shapes ideas/), then opens a PR for
+# review. Nothing is published — a human reviews and merges the PR.
+#
+# Setup required:
+#   1. Add your AI tool's API key as a repository secret (example: ANTHROPIC_API_KEY).
+#   2. Replace the command in the "Process inbox" step with your tool's CLI.
+
+on:
+  schedule:
+    - cron: '0 1 * * *'      # daily at 01:00 UTC — adjust to your timezone
+  push:
+    paths:
+      - 'inbox/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Process inbox
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "No API key set. Add ANTHROPIC_API_KEY (or your tool's key) as a repo secret,"
+            echo "then replace this step with your AI CLI, for example:"
+            echo "  claude -p 'Run the process-inbox skill over inbox/. Classify and label each note,"
+            echo "             draft blog items into drafts/, shape product-idea items into ideas/,"
+            echo "             move processed notes to inbox/archive/. Do not publish anything.'"
+            exit 0
+          fi
+          # Wire your AI tool here. It should run the process-inbox skill over inbox/:
+          #   - classify + label each note
+          #   - draft blog items into drafts/ (voice via writing-style, audited by ai-voice-check)
+          #   - shape product-idea items into ideas/
+          #   - move processed notes to inbox/archive/
+          echo "Running process-inbox..."
+
+      - name: Open a PR with the drafts
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: inbox/processed
+          title: "Inbox processed — drafts for review"
+          commit-message: "chore: process inbox into drafts"
+          body: |
+            Automated pass of the process-inbox skill.
+
+            Review the drafts. Nothing here is published — merge to keep, close to discard.
