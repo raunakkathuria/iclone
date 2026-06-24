@@ -71,13 +71,29 @@ point it anywhere):
 TARGETS="$HOME/.claude/skills" ./scripts/setup.sh   # or pick one
 ```
 
+## Capture from anywhere (optional)
+
+The repo is the source of truth, but you won't open a laptop every time a thought shows up. Because
+the clone is just files in git, you can reach the same `inbox/` from any device.
+
+The simplest setups, in order of effort:
+
+- **A Telegram bot via [OpenClaw](https://docs.openclaw.ai/).** Message a line from your phone and it
+  lands in `inbox/`, committed to the repo. Same clone, many devices. (This is what the author uses.)
+- **GitHub Issues as the inbox.** Open an issue from the GitHub mobile app; the workflow reads issues
+  and routes on their labels. No token to manage.
+- **An iOS Shortcut → GitHub contents API.** One tap to commit a note as `inbox/<timestamp>.md`.
+
+The point is the same: capture is constant and device-independent, because the brain is plain files
+that sync.
+
 ## Run it on a schedule (optional)
 
 `.github/workflows/process-inbox.yml` runs `process-inbox` on a schedule (and whenever you push to
 `inbox/`). It reads your raw notes, labels each one, drafts the `blog` items and shapes the
 `product-idea` items, and **opens a pull request** with the results. You review and merge — nothing
 is published automatically. Wire your AI tool's CLI and API key into the workflow's one step to turn
-it on.
+it on. (A scheduler like OpenClaw's can do the same job if you'd rather not use Actions.)
 
 ## Use it
 
