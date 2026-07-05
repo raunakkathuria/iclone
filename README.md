@@ -36,6 +36,10 @@ iclone/
       SKILL.md             # audit a draft for AI-sounding drift  (ready to use)
     process-inbox/
       SKILL.md             # classify, label, and draft from the inbox
+    web-accessibility/
+      SKILL.md             # apply WCAG 2 AA to design systems & UI  (ready to use)
+      scripts/             # zero-dependency contrast validator for CI
+      references/          # WCAG 2.2 AA checklist with fix patterns
   inbox/                   # raw thoughts land here  (two examples included)
   drafts/                  # process-inbox writes drafts here for review
   ideas/                   # product-idea notes get shaped here
@@ -58,6 +62,8 @@ writing-style skill. One source of truth per thing.
 - `skills/ai-voice-check/SKILL.md` is **ready to use as-is** — a generic auditor that flags
   AI-sounding drift in any draft.
 - `skills/process-inbox/SKILL.md` is the workflow that classifies and drafts; usable as-is.
+- `skills/web-accessibility/` is **ready to use as-is** — apply WCAG 2 AA to a design system or UI,
+  with a zero-dependency contrast validator you can wire into a build so failing colors can't ship.
 - Everything else is a **template** to make yours: the identity files, the example `TASTE.md`.
 
 ## Deploy it to your tools
