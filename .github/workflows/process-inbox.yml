@@ -40,7 +40,7 @@ jobs:
           fi
           # Wire your AI tool here. It should run the process-inbox skill over inbox/:
           #   - classify + label each note
-          #   - draft blog items into drafts/ (voice via writing-style, audited by ai-voice-check)
+          #   - draft blog items into drafts/ (voice via writing-style, then its "last read" check)
           #   - shape product-idea items into ideas/
           #   - move processed notes to inbox/archive/
           echo "Running process-inbox..."
