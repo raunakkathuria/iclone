@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
 import { test } from 'node:test';
-import { agentName, commandDir, fixPrompt, headBranch, isPrCreate, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
+import { agentName, commandDir, createResult, fixPrompt, headBranch, isPrCreate, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
 
 const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
 
@@ -27,6 +27,18 @@ test('commandDir follows a leading cd', () => {
   assert.equal(commandDir('cd ~/code && gh pr create', '/repo'), `${homedir()}/code`);
   // A cd after the PR command does not change where the PR was made.
   assert.equal(commandDir('cd a && gh pr create --fill && cd ../other', '/repo'), '/repo/a');
+  // Each cd starts from the one before it.
+  assert.equal(commandDir('cd service && cd app && gh pr create', '/repo'), '/repo/service/app');
+  assert.equal(commandDir('cd service && cd /abs && cd app && gh pr create', '/repo'), '/abs/app');
+});
+
+test('createResult reads the new PR URL, and sees a create that failed', () => {
+  const ok = createResult({ tool_response: { stdout: 'https://github.com/o/r/pull/9\n', stderr: '' } });
+  assert.deepEqual(ok, { failed: false, url: 'https://github.com/o/r/pull/9' });
+  const exists = createResult({ tool_response: { stderr: 'a pull request for branch "x" into branch "main" already exists:\nhttps://github.com/o/r/pull/4' } });
+  assert.equal(exists.failed, true);
+  assert.equal(createResult({ tool_response: 'https://github.com/o/r/pull/12' }).url, 'https://github.com/o/r/pull/12');
+  assert.deepEqual(createResult({}), { failed: false, url: null });
 });
 
 test('repoOf gives owner/repo, so each repository gets its own reviewer', () => {

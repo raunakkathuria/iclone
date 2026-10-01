@@ -52,10 +52,24 @@ export function isPrCreate(event) {
 export function commandDir(command, cwd) {
   const at = command.search(GH_PR_CREATE);
   const before = at >= 0 ? command.slice(0, at) : command;
-  const cd = [...before.matchAll(/(?:^|&&|;)\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g)].pop()?.[1];
-  if (!cd) return cwd;
-  const dir = unquote(cd).replace(/^~(?=\/|$)/, homedir());
-  return isAbsolute(dir) ? dir : join(cwd, dir);
+  let dir = cwd;
+  // Each cd starts from where the one before it left off: "cd a && cd b" ends in a/b.
+  for (const [, cd] of before.matchAll(/(?:^|&&|;)\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g)) {
+    const next = unquote(cd).replace(/^~(?=\/|$)/, homedir());
+    dir = isAbsolute(next) ? next : join(dir, next);
+  }
+  return dir;
+}
+
+// What "gh pr create" printed, from the tool's result. Each tool keeps it in a different
+// field, so this searches the whole result. "failed" means gh made no new PR.
+export function createResult(event) {
+  const raw = event?.tool_response;
+  const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
+  return {
+    failed: /already exists/i.test(text),
+    url: /https:\/\/github\.com\/[^/\s"\\]+\/[^/\s"\\]+\/pull\/\d+/.exec(text)?.[0] ?? null,
+  };
 }
 
 // The branch given with --head or -H, if any. Without it, gh uses the current branch.
@@ -105,7 +119,7 @@ export function reviewPrompt(pr) {
     'Check correctness, security, tests, and fit with the project rules.',
     'Do not edit, commit or push anything.',
     'Write only actionable findings, ranked P0 (must fix before merge) to P3 (nice to have), each with file:line and a one-line fix.',
-    `Post them as one review comment with gh pr review ${pr.url} --comment --body-file <file>. If you find nothing, post a comment that says so.`,
+    `Post them as one review comment with gh pr review ${pr.url} --comment --body-file <file>. If you find nothing, post a review comment that says so, the same way.`,
     'Then reply with the link to your comment.',
   ].join(' ');
 }
@@ -163,15 +177,16 @@ async function findPr(dir, head) {
   return null;
 }
 
-// The PR's reviews and comments: how many, and the link to the newest. Null when gh cannot tell.
-export function feedback(pr) {
+// The PR's reviews: how many, and the link to the newest. Null when gh cannot tell.
+// Plain comments do not count, so another comment, or the builder's reply, is never taken
+// for the review.
+export function reviews(pr) {
   try {
-    const list = (path) => JSON.parse(execFileSync('gh', ['api', `repos/${repoOf(pr.url)}/${path}/${pr.number}/${path === 'pulls' ? 'reviews' : 'comments'}?per_page=100`],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
-    const items = [...list('pulls'), ...list('issues')]
-      .map((i) => ({ url: i.html_url, at: i.submitted_at || i.created_at }))
-      .sort((a, b) => a.at.localeCompare(b.at));
-    return { count: items.length, newest: items.at(-1)?.url ?? null };
+    const out = execFileSync('gh', ['api', `repos/${repoOf(pr.url)}/pulls/${pr.number}/reviews?per_page=100`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const items = JSON.parse(out).filter((r) => r.submitted_at)
+      .sort((a, b) => a.submitted_at.localeCompare(b.submitted_at));
+    return { count: items.length, newest: items.at(-1)?.html_url ?? null };
   } catch { return null; }
 }
 
@@ -283,7 +298,10 @@ async function worker(builder, eventFile) {
   rmSync(eventFile, { force: true });
   const command = event.tool_input.command;
   const dir = commandDir(command, event.cwd || process.cwd());
-  const pr = await findPr(dir, headBranch(command));
+  // gh prints the new PR's URL; a failed create says the PR "already exists".
+  const created = createResult(event);
+  if (created.failed) return log(`skip: gh pr create made no new PR in ${dir}`);
+  const pr = await findPr(dir, created.url || headBranch(command));
   if (!pr) return log(`no PR found in ${dir}`);
   const age = (Date.now() - Date.parse(pr.createdAt)) / 1000;
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
@@ -306,7 +324,7 @@ async function worker(builder, eventFile) {
       await sleep(3000);
       await waitReady(pane, who, 2 * MINUTE);
     }
-    const before = feedback(pr);
+    const before = reviews(pr);
     if (!(await sendPrompt(pane, reviewPrompt(pr)))) {
       notify(`${who} did not start`, `Send the review of ${pr.url} to pane ${pane} yourself.`);
       return log(`${pr.url}: prompt to ${pane} stalled 3 times`);
@@ -314,11 +332,11 @@ async function worker(builder, eventFile) {
     log(`${pr.url}: review started in ${pane}`);
     if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${pr.url}: review still running after 3 hours`);
     // "Ready" alone does not prove a review: the prompt may have landed on a dialog. A new
-    // comment on the PR does.
-    const after = feedback(pr);
+    // review on the PR does.
+    const after = reviews(pr);
     if (!before || !after || after.count <= before.count) {
-      notify(`No review posted: PR #${pr.number}`, `The ${who} stopped without a new comment. Check pane ${pane}.`);
-      return log(`${pr.url}: reviewer ${pane} stopped, but no new comment on the PR`);
+      notify(`No review posted: PR #${pr.number}`, `The ${who} stopped without a new review. Check pane ${pane}.`);
+      return log(`${pr.url}: reviewer ${pane} stopped, but no new review on the PR`);
     }
     log(`${pr.url}: review posted: ${after.newest}`);
     return after.newest;

@@ -64,7 +64,7 @@ Then:
 ## When something goes wrong
 
 - See what the hook did: `tail ~/.local/state/pr-review-handoff/log`.
-- "No review posted": the reviewer stopped without a new comment on the PR. A dialog may have
+- "No review posted": the reviewer stopped without a new review on the PR. A dialog may have
   caught the prompt. Look at the reviewer pane.
 - No reviewer pane opens: start a new agent session, so that it loads the hook, and check that
   Codex approved the hook.
