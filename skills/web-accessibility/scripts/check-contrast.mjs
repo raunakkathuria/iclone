@@ -112,21 +112,23 @@ if (pairs.length === 0) {
 }
 
 // ---- check -----------------------------------------------------------------
-const results = pairs.map(({ fg, bg, min, label }) => {
+// Text mode prints each pair as it is checked, so a bad color later in the
+// list still leaves the earlier results on screen.
+const results = [];
+let failed = 0;
+for (const { fg, bg, min, label } of pairs) {
   const fgHex = resolve(fg);
   const bgHex = resolve(bg);
   const r = contrast(fgHex, bgHex);
-  return { label, fg: fgHex, bg: bgHex, ratio: Number(r.toFixed(2)), min, pass: r >= min };
-});
-const failed = results.filter((r) => !r.pass).length;
+  const ok = r >= min;
+  if (!ok) failed++;
+  if (json) results.push({ label, fg: fgHex, bg: bgHex, ratio: Number(r.toFixed(2)), min, pass: ok });
+  else console.log(`${ok ? "  ok " : "FAIL "} ${r.toFixed(2)}:1 (min ${min}) ${label}`);
+}
 
 if (json) {
   console.log(JSON.stringify(results, null, 2));
   process.exit(failed ? 1 : 0);
-}
-
-for (const { label, ratio, min, pass } of results) {
-  console.log(`${pass ? "  ok " : "FAIL "} ${ratio.toFixed(2)}:1 (min ${min}) ${label}`);
 }
 
 if (failed) {
