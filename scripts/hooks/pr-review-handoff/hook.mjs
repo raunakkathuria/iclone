@@ -49,10 +49,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // The heredocs that one line opens, in order: { word, tabs }. "tabs" is true for "<<-", which
 // strips leading tabs from the closing line. A "<<" counts only outside single quotes and
 // outside arithmetic such as $((1 << 2)). Inside double quotes it counts only within "$(...)",
-// as in --body "$(cat <<'EOF' ...)". "<<<" is a here-string, not a heredoc.
+// or a `...` backtick substitution, as in --body "$(cat <<'EOF' ...)". "<<<" is a here-string.
 export function heredocsOpened(line) {
   const found = [];
-  const stack = []; // "'", '"', 'cmd' for $(...) or (...), 'math' for $((...)) or ((...))
+  const stack = []; // "'", '"', 'cmd' for $(...) or (...), 'tick' for `...`, 'math' for $((...))
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     const top = stack.at(-1);
@@ -62,6 +62,7 @@ export function heredocsOpened(line) {
       if (c === '"') stack.pop();
       else if (line.startsWith('$((', i)) { stack.push('math'); i += 2; }
       else if (line.startsWith('$(', i)) { stack.push('cmd'); i += 1; }
+      else if (c === '`') stack.push('tick');
       continue;
     }
     if (top === 'math') {
@@ -69,6 +70,7 @@ export function heredocsOpened(line) {
       continue;
     }
     if (c === "'" || c === '"') { stack.push(c); continue; }
+    if (c === '`') { if (top === 'tick') stack.pop(); else stack.push('tick'); continue; }
     if (line.startsWith('((', i)) { stack.push('math'); i++; continue; }
     if (c === '(') { stack.push('cmd'); continue; }
     if (c === ')') { if (top === 'cmd') stack.pop(); continue; }
@@ -80,7 +82,9 @@ export function heredocsOpened(line) {
     while (line[j] === ' ' || line[j] === '\t') j++;
     // The delimiter is one shell word: quoted parts, escaped characters, or plain characters.
     let word = '';
-    while (j < line.length && !/[\s;&|<>()]/.test(line[j])) {
+    while (j < line.length && !/[\s;&|<>()`]/.test(line[j])) {
+      // $'EOF' is ANSI-C quoting: the delimiter is EOF.
+      if (line[j] === '$' && line[j + 1] === "'") { j++; continue; }
       if (line[j] === "'" || line[j] === '"') {
         const close = line.indexOf(line[j], j + 1);
         if (close < 0) break;

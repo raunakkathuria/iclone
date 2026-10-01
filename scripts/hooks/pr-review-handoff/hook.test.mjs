@@ -182,6 +182,10 @@ test('heredocsOpened reads full delimiter words and skips what is not a heredoc'
   assert.deepEqual(heredocsOpened('echo $((1 << 2)) && (( x <<= 1 ))'), []);
   assert.deepEqual(heredocsOpened('echo "a << b" \'c << d\''), []);
   assert.deepEqual(heredocsOpened('cat <<<"hello"'), []);
+  // $'EOF' is the word EOF, and a backtick substitution in double quotes can open a heredoc.
+  assert.deepEqual(heredocsOpened("cat <<$'EOF'"), [{ word: 'EOF', tabs: false }]);
+  assert.deepEqual(heredocsOpened('echo "`cat <<EOF'), [{ word: 'EOF', tabs: false }]);
+  assert.deepEqual(heredocsOpened('x=`cat <<END`'), [{ word: 'END', tabs: false }]);
 });
 
 test('withoutHeredocs ends a body only at its exact closing line', () => {
@@ -197,6 +201,9 @@ test('withoutHeredocs ends a body only at its exact closing line', () => {
   // For "<<-", leading tabs (only tabs) are stripped from the closing line.
   assert.equal(bash('cat <<-EOF\n\tbody\n\tEOF\ngh pr create'), true);
   assert.equal(bash('cat <<-EOF\n  EOF\n&& gh pr create\nEOF'), false);
+  // The command after a $'EOF' heredoc still counts; text in a backtick heredoc does not.
+  assert.equal(bash("cat <<$'EOF'\nbody\nEOF\ngh pr create --fill"), true);
+  assert.equal(bash('echo "`cat <<EOF\ngh pr create\nEOF\n`"'), false);
   // The usual way to pass a PR body.
   assert.equal(bash("gh pr create --title T --body \"$(cat <<'EOF'\nBody && gh pr view 2\nEOF\n)\""), true);
   assert.equal(withoutHeredocs("gh pr create --body \"$(cat <<'EOF'\nBody\nEOF\n)\""), "gh pr create --body \"$(cat <<'EOF'\n)\"");
