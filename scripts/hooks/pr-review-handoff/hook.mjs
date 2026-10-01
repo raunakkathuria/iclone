@@ -46,21 +46,73 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- Pure helpers (unit-tested in hook.test.mjs) ---
 
+// The heredocs that one line opens, in order: { word, tabs }. "tabs" is true for "<<-", which
+// strips leading tabs from the closing line. A "<<" counts only outside single quotes and
+// outside arithmetic such as $((1 << 2)). Inside double quotes it counts only within "$(...)",
+// or a `...` backtick substitution, as in --body "$(cat <<'EOF' ...)". "<<<" is a here-string.
+export function heredocsOpened(line) {
+  const found = [];
+  const stack = []; // "'", '"', 'cmd' for $(...) or (...), 'tick' for `...`, 'math' for $((...))
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    const top = stack.at(-1);
+    if (top === "'") { if (c === "'") stack.pop(); continue; }
+    if (c === '\\') { i++; continue; }
+    if (top === '"') {
+      if (c === '"') stack.pop();
+      else if (line.startsWith('$((', i)) { stack.push('math'); i += 2; }
+      else if (line.startsWith('$(', i)) { stack.push('cmd'); i += 1; }
+      else if (c === '`') stack.push('tick');
+      continue;
+    }
+    if (top === 'math') {
+      if (line.startsWith('))', i)) { stack.pop(); i++; }
+      continue;
+    }
+    if (c === "'" || c === '"') { stack.push(c); continue; }
+    if (c === '`') { if (top === 'tick') stack.pop(); else stack.push('tick'); continue; }
+    if (line.startsWith('((', i)) { stack.push('math'); i++; continue; }
+    if (c === '(') { stack.push('cmd'); continue; }
+    if (c === ')') { if (top === 'cmd') stack.pop(); continue; }
+    if (!line.startsWith('<<', i)) continue;
+    if (line[i + 2] === '<') { i += 2; continue; }
+    let j = i + 2;
+    const tabs = line[j] === '-';
+    if (tabs) j++;
+    while (line[j] === ' ' || line[j] === '\t') j++;
+    // The delimiter is one shell word: quoted parts, escaped characters, or plain characters.
+    let word = '';
+    while (j < line.length && !/[\s;&|<>()`]/.test(line[j])) {
+      // $'EOF' is ANSI-C quoting: the delimiter is EOF.
+      if (line[j] === '$' && line[j + 1] === "'") { j++; continue; }
+      if (line[j] === "'" || line[j] === '"') {
+        const close = line.indexOf(line[j], j + 1);
+        if (close < 0) break;
+        word += line.slice(j + 1, close);
+        j = close + 1;
+      } else if (line[j] === '\\') { word += line[j + 1] ?? ''; j += 2; }
+      else { word += line[j]; j++; }
+    }
+    if (word) found.push({ word, tabs });
+    i = j - 1;
+  }
+  return found;
+}
+
 // The command without the bodies of its heredocs. A heredoc body is text, never a command, so
-// "&& gh pr create" written inside one must not count.
-// It reads line by line: each "<<WORD" on a line adds a body that starts on the next line and
-// ends at a line that is only WORD. One line can open several, which end in order.
-// "<<<" is a here-string, not a heredoc, so it is left alone.
+// "&& gh pr create" written inside one must not count. Each body ends at a line that is exactly
+// its word (after leading tabs, for "<<-"), and the bodies of one line end in order.
 export function withoutHeredocs(command) {
   const kept = [];
   const open = [];
   for (const line of command.split('\n')) {
     if (open.length) {
-      if (line.trim() === open[0]) open.shift();
+      const { word, tabs } = open[0];
+      if ((tabs ? line.replace(/^\t+/, '') : line) === word) open.shift();
       continue;
     }
     kept.push(line);
-    for (const [, , word] of line.matchAll(/(?<!<)<<(?!<)-?\s*(['"]?)(\w+)\1/g)) open.push(word);
+    open.push(...heredocsOpened(line));
   }
   return kept.join('\n');
 }
