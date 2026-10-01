@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
 import { test } from 'node:test';
-import { agentName, commandDir, createResult, fixPrompt, headBranch, isPrCreate, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
+import { agentName, commandDir, createResult, fixPrompt, headBranch, isPrCreate, isReviewerPane, recentStarts, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
 
 const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
 
@@ -102,4 +102,21 @@ test('fixPrompt asks the builder to fix, push and reply with each finding', () =
   assert.match(text, /gh pr comment https:\/\/github.com\/o\/r\/pull\/7 --body-file/);
   assert.match(text, /not fixed" with the reason/);
   assert.doesNotMatch(text, /\n/);
+});
+
+test('isReviewerPane stops a reviewer pane from starting another review', () => {
+  const saved = { '/s.sock|wV|o/r|codex': 'wV:p2', '/other.sock|wV|o/r|codex': 'wV:p5' };
+  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p2', label: 'codex review' }), true);
+  // A builder pane, and a reviewer pane of another server, are not reviewers here.
+  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p1', label: 'claude build' }), false);
+  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p5', label: 'codex review' }), false);
+  // After a restart the ID may belong to a user's pane: no hook label, so not a reviewer.
+  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p2', label: 'my notes' }), false);
+  assert.equal(isReviewerPane(saved, '/s.sock', null), false);
+});
+
+test('recentStarts keeps only the last hour', () => {
+  const now = 10 * 3_600_000;
+  assert.deepEqual(recentStarts([now - 3_700_000, now - 1_000, now - 60_000], now), [now - 1_000, now - 60_000]);
+  assert.deepEqual(recentStarts(undefined, now), []);
 });

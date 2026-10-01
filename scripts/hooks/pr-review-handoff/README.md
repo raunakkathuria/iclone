@@ -21,6 +21,15 @@ agent start, prompt and read another agent in the next pane.
 Claude's PRs go to Codex, and Codex's PRs go to Claude. Set `PR_REVIEWER=claude` or
 `PR_REVIEWER=codex` before you start an agent to choose the reviewer yourself.
 
+## Why it never loops
+
+- Only `gh pr create` starts a review. The fixes are pushed to the same PR, and the reply is a
+  plain comment, so neither starts another review. Each PR is reviewed once.
+- A PR opened from a reviewer pane gets no review.
+- At most 3 reviews per builder pane per hour. Then Herdr shows "Review loop paused", and you
+  review that PR yourself. Set `PR_REVIEW_MAX_PER_HOUR` to change the limit.
+- The fixes themselves are not reviewed again. Ask for a second review yourself if you want one.
+
 ## What you need
 
 - [Herdr](https://herdr.dev), with your agents running in Herdr panes.
