@@ -36,6 +36,9 @@ const CLEAR_COMMAND = { claude: '/clear', codex: '/new' };
 const READY = new Set(['idle', 'done']);
 // A PR created longer ago than this was not made by the command, which may have failed.
 const MAX_PR_AGE_SECONDS = 600;
+// Loop guard: at most this many reviews per builder pane per hour. PR_REVIEW_MAX_PER_HOUR changes it.
+const MAX_REVIEWS_PER_HOUR = Number(process.env.PR_REVIEW_MAX_PER_HOUR) || 3;
+const HOUR = 3_600_000;
 const MINUTE = 60_000;
 
 const unquote = (s) => s.replace(/^(["'])([\s\S]*)\1$/, '$2');
@@ -95,6 +98,20 @@ export function splitDirection(rect) {
 }
 
 export const reviewLabel = (tool) => `${tool} review`;
+
+// Whether a pane is a reviewer pane this hook opened on this server. A reviewer that opens a PR
+// must not start another review, or reviews could chain without end. The label check keeps a
+// user's pane safe if its ID once belonged to a reviewer pane before a server restart.
+export function isReviewerPane(reviewers, socket, pane) {
+  if (!pane) return false;
+  const saved = Object.entries(reviewers).some(([key, id]) => key.startsWith(`${socket}|`) && id === pane.pane_id);
+  return saved && /^(claude|codex) review$/.test(pane.label ?? '');
+}
+
+// The review start times that fall inside the last hour, oldest first.
+export function recentStarts(times = [], now = Date.now()) {
+  return times.filter((t) => now - t < HOUR);
+}
 
 // "owner/repo" from a PR URL, so that each repository gets its own reviewer pane.
 export function repoOf(url) {
@@ -207,7 +224,7 @@ async function withLock(key, work) {
   for (;;) {
     try { mkdirSync(lock); break; } catch {
       try { if (Date.now() - statSync(lock).mtimeMs > 180 * MINUTE) rmSync(lock, { recursive: true, force: true }); } catch { /* gone */ }
-      await sleep(10_000);
+      await sleep(2000);
     }
   }
   try { return await work(); } finally { rmSync(lock, { recursive: true, force: true }); }
@@ -216,6 +233,30 @@ async function withLock(key, work) {
 // Reviewer panes this hook made, by session, workspace and tool.
 const REVIEWERS_FILE = join(STATE_DIR, 'reviewers.json');
 function loadReviewers() { try { return JSON.parse(readFileSync(REVIEWERS_FILE, 'utf8')); } catch { return {}; } }
+
+// When each builder pane started a review, for the loop guard. One file per pane, so a write for
+// one pane never wipes another pane's times.
+const startsFile = (key) => join(STATE_DIR, 'review-starts', `${createHash('sha1').update(key).digest('hex')}.json`);
+function loadStarts(key) { try { return JSON.parse(readFileSync(startsFile(key), 'utf8')); } catch { return []; } }
+function saveStarts(key, times) {
+  mkdirSync(join(STATE_DIR, 'review-starts'), { recursive: true });
+  writeFileSync(startsFile(key), JSON.stringify(times));
+}
+
+// Takes a review slot for one builder pane: checks the hourly limit, claims the PR, and saves the
+// start time, all under one lock per pane. Without the lock, workers for PRs made at the same time
+// could all read the same count and all pass. Returns 'ok', 'paused' or 'duplicate'.
+// holdMs is for the test only: it widens the gap between the read and the write.
+export async function takeReviewSlot(slotKey, url, max = MAX_REVIEWS_PER_HOUR, holdMs = 0) {
+  return withLock(`slot-${createHash('sha1').update(slotKey).digest('hex')}`, async () => {
+    const starts = recentStarts(loadStarts(slotKey));
+    if (holdMs) await sleep(holdMs);
+    if (starts.length >= max) return 'paused';
+    if (!claimPr(url)) return 'duplicate';
+    saveStarts(slotKey, [...starts, Date.now()]);
+    return 'ok';
+  });
+}
 function saveReviewer(key, paneId) {
   const all = loadReviewers();
   all[key] = paneId;
@@ -296,6 +337,14 @@ async function getReviewerPane({ key, workspace, builderPane, tool, dir }) {
 async function worker(builder, eventFile) {
   const event = JSON.parse(readFileSync(eventFile, 'utf8'));
   rmSync(eventFile, { force: true });
+  const socket = process.env.HERDR_SOCKET_PATH;
+  const builderPane = process.env.HERDR_PANE_ID;
+  let current = null;
+  try { current = herdr('pane', 'get', builderPane).pane; } catch { /* no pane */ }
+  if (isReviewerPane(loadReviewers(), socket, current)) {
+    notify('PR from a reviewer pane', `Pane ${builderPane} is a reviewer, so its PR gets no automatic review.`);
+    return log(`skip: gh pr create ran in reviewer pane ${builderPane}`);
+  }
   const command = event.tool_input.command;
   const dir = commandDir(command, event.cwd || process.cwd());
   // gh prints the new PR's URL; a failed create says the PR "already exists".
@@ -305,13 +354,18 @@ async function worker(builder, eventFile) {
   if (!pr) return log(`no PR found in ${dir}`);
   const age = (Date.now() - Date.parse(pr.createdAt)) / 1000;
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
-  if (!claimPr(pr.url)) return log(`skip ${pr.url}: already handed off`);
+  const slot = await takeReviewSlot(`${socket}|${builderPane}`, pr.url);
+  if (slot === 'paused') {
+    notify(`Review loop paused: PR #${pr.number}`, `Pane ${builderPane} reached ${MAX_REVIEWS_PER_HOUR} reviewed PRs in the last hour. Review this one yourself, or raise PR_REVIEW_MAX_PER_HOUR.`);
+    return log(`skip ${pr.url}: ${MAX_REVIEWS_PER_HOUR} reviews from ${builderPane} in the last hour`);
+  }
+  if (slot === 'duplicate') return log(`skip ${pr.url}: already handed off`);
 
   const tool = reviewerTool(builder, process.env);
   const workspace = process.env.HERDR_WORKSPACE_ID;
   // One reviewer pane per session, workspace, repository and tool.
-  const key = `${process.env.HERDR_SOCKET_PATH}|${workspace}|${repoOf(pr.url)}|${tool}`;
-  const ctx = { key, workspace, builderPane: process.env.HERDR_PANE_ID, tool, dir };
+  const key = `${socket}|${workspace}|${repoOf(pr.url)}|${tool}`;
+  const ctx = { key, workspace, builderPane, tool, dir };
   log(`${pr.url}: built by ${builder}, review by ${tool}`);
   const lockKey = createHash('sha1').update(key).digest('hex');
   const reviewUrl = await withLock(lockKey, async () => {

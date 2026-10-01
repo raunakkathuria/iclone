@@ -1,8 +1,12 @@
 // Run: node --test scripts/hooks/pr-review-handoff/hook.test.mjs
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { test } from 'node:test';
-import { agentName, commandDir, createResult, fixPrompt, headBranch, isPrCreate, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
+import { agentName, commandDir, createResult, fixPrompt, headBranch, isPrCreate, isReviewerPane, recentStarts, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
 
 const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
 
@@ -102,4 +106,40 @@ test('fixPrompt asks the builder to fix, push and reply with each finding', () =
   assert.match(text, /gh pr comment https:\/\/github.com\/o\/r\/pull\/7 --body-file/);
   assert.match(text, /not fixed" with the reason/);
   assert.doesNotMatch(text, /\n/);
+});
+
+test('isReviewerPane stops a reviewer pane from starting another review', () => {
+  const saved = { '/s.sock|wV|o/r|codex': 'wV:p2', '/other.sock|wV|o/r|codex': 'wV:p5' };
+  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p2', label: 'codex review' }), true);
+  // A builder pane, and a reviewer pane of another server, are not reviewers here.
+  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p1', label: 'claude build' }), false);
+  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p5', label: 'codex review' }), false);
+  // After a restart the ID may belong to a user's pane: no hook label, so not a reviewer.
+  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p2', label: 'my notes' }), false);
+  assert.equal(isReviewerPane(saved, '/s.sock', null), false);
+});
+
+test('recentStarts keeps only the last hour', () => {
+  const now = 10 * 3_600_000;
+  assert.deepEqual(recentStarts([now - 3_700_000, now - 1_000, now - 60_000], now), [now - 1_000, now - 60_000]);
+  assert.deepEqual(recentStarts(undefined, now), []);
+});
+
+test('takeReviewSlot keeps the hourly limit when workers run at the same time', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'prh-slot-'));
+  const hook = new URL('./hook.mjs', import.meta.url).href;
+  // 6 workers for 6 different PRs from one builder pane start together; the limit is 3.
+  const run = (n) => new Promise((done) => {
+    const code = `import(${JSON.stringify(hook)}).then(async (m) => process.stdout.write(await m.takeReviewSlot('/s.sock|wV:p1', 'https://github.com/o/r/pull/${n}', 3, 300)))`;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, PR_HANDOFF_STATE_DIR: state } });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('close', () => done(out));
+  });
+  const results = await Promise.all([1, 2, 3, 4, 5, 6].map(run));
+  assert.equal(results.filter((r) => r === 'ok').length, 3);
+  assert.equal(results.filter((r) => r === 'paused').length, 3);
+  // All 3 start times are kept: no write wiped another.
+  const [file] = readdirSync(join(state, 'review-starts'));
+  assert.equal(JSON.parse(readFileSync(join(state, 'review-starts', file), 'utf8')).length, 3);
 });
