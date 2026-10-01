@@ -46,9 +46,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- Pure helpers (unit-tested in hook.test.mjs) ---
 
+// The command without the bodies of its heredocs. A heredoc body is text, never a command, so
+// "&& gh pr create" written inside one must not count.
+export function withoutHeredocs(command) {
+  return command.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\s|$|\))/g, '<<$2');
+}
+
 export function isPrCreate(event) {
   const command = event?.tool_input?.command;
-  return SHELL_TOOLS.has(event?.tool_name) && typeof command === 'string' && GH_PR_CREATE.test(command);
+  return SHELL_TOOLS.has(event?.tool_name) && typeof command === 'string' && GH_PR_CREATE.test(withoutHeredocs(command));
 }
 
 // The folder "gh pr create" ran in: the event's folder, changed by a "cd X &&" before it.
@@ -65,14 +71,19 @@ export function commandDir(command, cwd) {
 }
 
 // What "gh pr create" printed, from the tool's result. Each tool keeps it in a different
-// field, so this searches the whole result. "failed" means gh made no new PR.
+// field, so this searches the whole result. "failed" means gh made no new PR. The URL is used
+// only when the output has exactly one PR URL: another command in the same line, such as
+// "gh pr view 3 && gh pr create", can print a different PR first.
 export function createResult(event) {
   const raw = event?.tool_response;
   const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
-  return {
-    failed: /already exists/i.test(text),
-    url: /https:\/\/github\.com\/[^/\s"\\]+\/[^/\s"\\]+\/pull\/\d+/.exec(text)?.[0] ?? null,
-  };
+  const urls = [...new Set(text.match(/https:\/\/github\.com\/[^/\s"\\]+\/[^/\s"\\]+\/pull\/\d+/g) ?? [])];
+  return { failed: /already exists/i.test(text), url: urls.length === 1 ? urls[0] : null };
+}
+
+// Whether the PR is on the branch the command made a PR for. --head can be "owner:branch".
+export function sameBranch(expected, headRefName) {
+  return !expected || expected.replace(/^[^:]+:/, '') === headRefName;
 }
 
 // The branch given with --head or -H, if any. Without it, gh uses the current branch.
@@ -187,7 +198,7 @@ async function findPr(dir, head) {
   // GitHub can take a moment to show a new PR, so try a few times.
   for (let i = 0; i < 4; i++) {
     try {
-      const args = ['pr', 'view', ...(head ? [head] : []), '--json', 'number,url,state,createdAt'];
+      const args = ['pr', 'view', ...(head ? [head] : []), '--json', 'number,url,state,createdAt,headRefName'];
       return JSON.parse(execFileSync('gh', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     } catch { await sleep(3000); }
   }
@@ -345,13 +356,20 @@ async function worker(builder, eventFile) {
     notify('PR from a reviewer pane', `Pane ${builderPane} is a reviewer, so its PR gets no automatic review.`);
     return log(`skip: gh pr create ran in reviewer pane ${builderPane}`);
   }
-  const command = event.tool_input.command;
+  const command = withoutHeredocs(event.tool_input.command);
   const dir = commandDir(command, event.cwd || process.cwd());
   // gh prints the new PR's URL; a failed create says the PR "already exists".
   const created = createResult(event);
   if (created.failed) return log(`skip: gh pr create made no new PR in ${dir}`);
-  const pr = await findPr(dir, created.url || headBranch(command));
+  const head = headBranch(command);
+  const pr = await findPr(dir, created.url || head);
   if (!pr) return log(`no PR found in ${dir}`);
+  // The PR must be on the branch the command made it for: --head, or else the folder's branch.
+  let branch = head;
+  if (!branch) {
+    try { branch = execFileSync('git', ['-C', dir, 'branch', '--show-current'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* not a git folder */ }
+  }
+  if (!sameBranch(branch, pr.headRefName)) return log(`skip ${pr.url}: its branch ${pr.headRefName} is not ${branch}`);
   const age = (Date.now() - Date.parse(pr.createdAt)) / 1000;
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
   const slot = await takeReviewSlot(`${socket}|${builderPane}`, pr.url);
