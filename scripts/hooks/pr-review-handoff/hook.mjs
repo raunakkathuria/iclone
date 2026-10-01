@@ -224,7 +224,7 @@ async function withLock(key, work) {
   for (;;) {
     try { mkdirSync(lock); break; } catch {
       try { if (Date.now() - statSync(lock).mtimeMs > 180 * MINUTE) rmSync(lock, { recursive: true, force: true }); } catch { /* gone */ }
-      await sleep(10_000);
+      await sleep(2000);
     }
   }
   try { return await work(); } finally { rmSync(lock, { recursive: true, force: true }); }
@@ -234,13 +234,28 @@ async function withLock(key, work) {
 const REVIEWERS_FILE = join(STATE_DIR, 'reviewers.json');
 function loadReviewers() { try { return JSON.parse(readFileSync(REVIEWERS_FILE, 'utf8')); } catch { return {}; } }
 
-// When each builder pane started a review, for the loop guard.
-const STARTS_FILE = join(STATE_DIR, 'review-starts.json');
-function loadStarts() { try { return JSON.parse(readFileSync(STARTS_FILE, 'utf8')); } catch { return {}; } }
+// When each builder pane started a review, for the loop guard. One file per pane, so a write for
+// one pane never wipes another pane's times.
+const startsFile = (key) => join(STATE_DIR, 'review-starts', `${createHash('sha1').update(key).digest('hex')}.json`);
+function loadStarts(key) { try { return JSON.parse(readFileSync(startsFile(key), 'utf8')); } catch { return []; } }
 function saveStarts(key, times) {
-  const all = loadStarts();
-  all[key] = times;
-  writeFileSync(STARTS_FILE, JSON.stringify(all, null, 2));
+  mkdirSync(join(STATE_DIR, 'review-starts'), { recursive: true });
+  writeFileSync(startsFile(key), JSON.stringify(times));
+}
+
+// Takes a review slot for one builder pane: checks the hourly limit, claims the PR, and saves the
+// start time, all under one lock per pane. Without the lock, workers for PRs made at the same time
+// could all read the same count and all pass. Returns 'ok', 'paused' or 'duplicate'.
+// holdMs is for the test only: it widens the gap between the read and the write.
+export async function takeReviewSlot(slotKey, url, max = MAX_REVIEWS_PER_HOUR, holdMs = 0) {
+  return withLock(`slot-${createHash('sha1').update(slotKey).digest('hex')}`, async () => {
+    const starts = recentStarts(loadStarts(slotKey));
+    if (holdMs) await sleep(holdMs);
+    if (starts.length >= max) return 'paused';
+    if (!claimPr(url)) return 'duplicate';
+    saveStarts(slotKey, [...starts, Date.now()]);
+    return 'ok';
+  });
 }
 function saveReviewer(key, paneId) {
   const all = loadReviewers();
@@ -339,14 +354,12 @@ async function worker(builder, eventFile) {
   if (!pr) return log(`no PR found in ${dir}`);
   const age = (Date.now() - Date.parse(pr.createdAt)) / 1000;
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
-  const startsKey = `${socket}|${builderPane}`;
-  const starts = recentStarts(loadStarts()[startsKey]);
-  if (starts.length >= MAX_REVIEWS_PER_HOUR) {
-    notify(`Review loop paused: PR #${pr.number}`, `Pane ${builderPane} opened ${starts.length} reviewed PRs in the last hour. Review this one yourself, or raise PR_REVIEW_MAX_PER_HOUR.`);
-    return log(`skip ${pr.url}: ${starts.length} reviews from ${builderPane} in the last hour`);
+  const slot = await takeReviewSlot(`${socket}|${builderPane}`, pr.url);
+  if (slot === 'paused') {
+    notify(`Review loop paused: PR #${pr.number}`, `Pane ${builderPane} reached ${MAX_REVIEWS_PER_HOUR} reviewed PRs in the last hour. Review this one yourself, or raise PR_REVIEW_MAX_PER_HOUR.`);
+    return log(`skip ${pr.url}: ${MAX_REVIEWS_PER_HOUR} reviews from ${builderPane} in the last hour`);
   }
-  if (!claimPr(pr.url)) return log(`skip ${pr.url}: already handed off`);
-  saveStarts(startsKey, [...starts, Date.now()]);
+  if (slot === 'duplicate') return log(`skip ${pr.url}: already handed off`);
 
   const tool = reviewerTool(builder, process.env);
   const workspace = process.env.HERDR_WORKSPACE_ID;
