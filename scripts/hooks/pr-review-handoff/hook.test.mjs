@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { test } from 'node:test';
-import { agentName, commandDir, createResult, sameBranch, withoutHeredocs, fixPrompt, headBranch, isPrCreate, isReviewerPane, recentStarts, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
+import { agentName, commandDir, createResult, heredocsOpened, sameBranch, withoutHeredocs, fixPrompt, headBranch, isPrCreate, isReviewerPane, recentStarts, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
 
 const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
 
@@ -171,4 +171,33 @@ test('takeReviewSlot keeps the hourly limit when workers run at the same time', 
 test('withoutHeredocs keeps the command lines and drops each body', () => {
   assert.equal(withoutHeredocs("cat <<A <<'B'\none\nA\ntwo\nB\ngh pr create"), "cat <<A <<'B'\ngh pr create");
   assert.equal(withoutHeredocs('git push && gh pr create --fill'), 'git push && gh pr create --fill');
+});
+
+test('heredocsOpened reads full delimiter words and skips what is not a heredoc', () => {
+  assert.deepEqual(heredocsOpened("cat <<'EOF'"), [{ word: 'EOF', tabs: false }]);
+  assert.deepEqual(heredocsOpened('cat <<END-OF'), [{ word: 'END-OF', tabs: false }]);
+  assert.deepEqual(heredocsOpened('cat <<-"A B" <<\\C'), [{ word: 'A B', tabs: true }, { word: 'C', tabs: false }]);
+  assert.deepEqual(heredocsOpened('gh pr create --body "$(cat <<\'EOF\'"'), [{ word: 'EOF', tabs: false }]);
+  // Not heredocs: a shift in arithmetic, text in quotes, a here-string.
+  assert.deepEqual(heredocsOpened('echo $((1 << 2)) && (( x <<= 1 ))'), []);
+  assert.deepEqual(heredocsOpened('echo "a << b" \'c << d\''), []);
+  assert.deepEqual(heredocsOpened('cat <<<"hello"'), []);
+});
+
+test('withoutHeredocs ends a body only at its exact closing line', () => {
+  const bash = (command) => isPrCreate({ tool_name: 'Bash', tool_input: { command } });
+  // A shift or a quoted "<<" does not hide the real command after it.
+  assert.equal(bash('echo $((1 << 2))\ngh pr create --fill'), true);
+  assert.equal(bash('echo "x << y"\ngh pr create --fill'), true);
+  // A delimiter with punctuation is read in full.
+  assert.equal(bash('cat <<END-OF\n&& gh pr create\nEND-OF'), false);
+  assert.equal(bash('cat <<END-OF\nbody\nEND-OF\ngh pr create'), true);
+  // For "<<", a line with a space before EOF does not end the body.
+  assert.equal(bash('cat <<EOF\n EOF\n&& gh pr create\nEOF'), false);
+  // For "<<-", leading tabs (only tabs) are stripped from the closing line.
+  assert.equal(bash('cat <<-EOF\n\tbody\n\tEOF\ngh pr create'), true);
+  assert.equal(bash('cat <<-EOF\n  EOF\n&& gh pr create\nEOF'), false);
+  // The usual way to pass a PR body.
+  assert.equal(bash("gh pr create --title T --body \"$(cat <<'EOF'\nBody && gh pr view 2\nEOF\n)\""), true);
+  assert.equal(withoutHeredocs("gh pr create --body \"$(cat <<'EOF'\nBody\nEOF\n)\""), "gh pr create --body \"$(cat <<'EOF'\n)\"");
 });
