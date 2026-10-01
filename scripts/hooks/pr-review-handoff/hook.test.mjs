@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { test } from 'node:test';
-import { agentName, commandDir, createResult, fixPrompt, headBranch, isPrCreate, isReviewerPane, recentStarts, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
+import { agentName, commandDir, createResult, sameBranch, withoutHeredocs, fixPrompt, headBranch, isPrCreate, isReviewerPane, recentStarts, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
 
 const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
 
@@ -20,6 +20,17 @@ test('isPrCreate matches gh pr create only', () => {
   assert.equal(isPrCreate(bash('gh pr view 4')), false);
   assert.equal(isPrCreate(bash('echo "then run gh pr create" > notes.md')), false);
   assert.equal(isPrCreate(bash("python3 - <<'PY'\n# After an agent runs \"gh pr create\" here\nPY")), false);
+  // Inside a heredoc, even text that looks like a command chain is only text.
+  assert.equal(isPrCreate(bash("python3 - <<'PY'\nnote = 'gh pr view 3 && gh pr create'\nPY")), false);
+  assert.equal(isPrCreate(bash("cat > a.md <<EOF\nrun:\ngh pr create --fill\nEOF\ngit add a.md")), false);
+  // A real create next to a heredoc still counts, and so does a body passed with a heredoc.
+  assert.equal(isPrCreate(bash("cat > b.md <<'EOF'\ntext\nEOF\ngh pr create --body-file b.md")), true);
+  assert.equal(isPrCreate(bash("gh pr create --title T --body-file - <<'EOF'\nBody && gh pr view 2\nEOF")), true);
+  // One line can open two heredocs: both bodies are text.
+  assert.equal(isPrCreate(bash('cat <<A <<B\nfirst\nA\n&& gh pr create\nB')), false);
+  assert.equal(isPrCreate(bash("cat <<-'X'\n\tgh pr create\n\tX\necho done")), false);
+  // A here-string is not a heredoc, so the command after it still counts.
+  assert.equal(isPrCreate(bash('cat <<<"hello" && gh pr create --fill')), true);
   assert.equal(isPrCreate({ tool_name: 'Write', tool_input: { command: 'gh pr create' } }), false);
   assert.equal(isPrCreate({}), false);
 });
@@ -43,6 +54,19 @@ test('createResult reads the new PR URL, and sees a create that failed', () => {
   assert.equal(exists.failed, true);
   assert.equal(createResult({ tool_response: 'https://github.com/o/r/pull/12' }).url, 'https://github.com/o/r/pull/12');
   assert.deepEqual(createResult({}), { failed: false, url: null });
+  // Another PR's URL in the same output: ambiguous, so no URL is trusted.
+  const two = createResult({ tool_response: { stdout: 'title: Old\nurl: https://github.com/o/r/pull/3\nhttps://github.com/o/r/pull/9\n' } });
+  assert.equal(two.url, null);
+  // The same URL twice is still one PR.
+  assert.equal(createResult({ tool_response: 'https://github.com/o/r/pull/9 https://github.com/o/r/pull/9' }).url, 'https://github.com/o/r/pull/9');
+});
+
+test('sameBranch checks the PR is on the branch the command made it for', () => {
+  assert.equal(sameBranch('feat/x', 'feat/x'), true);
+  assert.equal(sameBranch('octo:feat/x', 'feat/x'), true);
+  assert.equal(sameBranch('feat/x', 'main'), false);
+  // Unknown branch (not a git folder): nothing to compare.
+  assert.equal(sameBranch(null, 'feat/x'), true);
 });
 
 test('repoOf gives owner/repo, so each repository gets its own reviewer', () => {
@@ -142,4 +166,9 @@ test('takeReviewSlot keeps the hourly limit when workers run at the same time', 
   // All 3 start times are kept: no write wiped another.
   const [file] = readdirSync(join(state, 'review-starts'));
   assert.equal(JSON.parse(readFileSync(join(state, 'review-starts', file), 'utf8')).length, 3);
+});
+
+test('withoutHeredocs keeps the command lines and drops each body', () => {
+  assert.equal(withoutHeredocs("cat <<A <<'B'\none\nA\ntwo\nB\ngh pr create"), "cat <<A <<'B'\ngh pr create");
+  assert.equal(withoutHeredocs('git push && gh pr create --fill'), 'git push && gh pr create --fill');
 });
