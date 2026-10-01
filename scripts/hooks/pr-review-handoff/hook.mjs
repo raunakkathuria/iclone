@@ -48,8 +48,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The command without the bodies of its heredocs. A heredoc body is text, never a command, so
 // "&& gh pr create" written inside one must not count.
+// It reads line by line: each "<<WORD" on a line adds a body that starts on the next line and
+// ends at a line that is only WORD. One line can open several, which end in order.
+// "<<<" is a here-string, not a heredoc, so it is left alone.
 export function withoutHeredocs(command) {
-  return command.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\s|$|\))/g, '<<$2');
+  const kept = [];
+  const open = [];
+  for (const line of command.split('\n')) {
+    if (open.length) {
+      if (line.trim() === open[0]) open.shift();
+      continue;
+    }
+    kept.push(line);
+    for (const [, , word] of line.matchAll(/(?<!<)<<(?!<)-?\s*(['"]?)(\w+)\1/g)) open.push(word);
+  }
+  return kept.join('\n');
 }
 
 export function isPrCreate(event) {
@@ -364,12 +377,9 @@ async function worker(builder, eventFile) {
   const head = headBranch(command);
   const pr = await findPr(dir, created.url || head);
   if (!pr) return log(`no PR found in ${dir}`);
-  // The PR must be on the branch the command made it for: --head, or else the folder's branch.
-  let branch = head;
-  if (!branch) {
-    try { branch = execFileSync('git', ['-C', dir, 'branch', '--show-current'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* not a git folder */ }
-  }
-  if (!sameBranch(branch, pr.headRefName)) return log(`skip ${pr.url}: its branch ${pr.headRefName} is not ${branch}`);
+  // With --head, the PR must be on that branch. The folder's current branch is not checked: the
+  // same command may switch branches after "gh pr create" ("&& git switch main").
+  if (!sameBranch(head, pr.headRefName)) return log(`skip ${pr.url}: its branch ${pr.headRefName} is not ${head}`);
   const age = (Date.now() - Date.parse(pr.createdAt)) / 1000;
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
   const slot = await takeReviewSlot(`${socket}|${builderPane}`, pr.url);
