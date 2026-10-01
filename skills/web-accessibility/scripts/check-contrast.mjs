@@ -15,6 +15,11 @@
  *   # or a JSON config file:
  *   node check-contrast.mjs contrast-pairs.json
  *
+ *   # add --json to print one JSON array instead of text lines:
+ *   #   [{ "label", "fg", "bg", "ratio", "min", "pass" }, ...]
+ *   # fg and bg are the resolved hex values. Exit codes do not change.
+ *   node check-contrast.mjs contrast-pairs.json --json
+ *
  * Config format (colors map is optional — pairs may use raw hex directly):
  *   {
  *     "colors": { "teal-700": "#0f766e", "white": "#ffffff" },
@@ -56,6 +61,7 @@ const contrast = (fgHex, bgHex) => {
 const args = process.argv.slice(2);
 const pairs = []; // { fg, bg, min, label }
 let colors = {};
+let json = false;
 
 const resolve = (nameOrHex) => {
   const fromMap = colors[nameOrHex];
@@ -82,8 +88,10 @@ for (let i = 0; i < args.length; i++) {
     if (!spec) { console.error("error: --pair needs a value: fg,bg,min,label"); process.exit(2); }
     const [fg, bg, min, ...label] = spec.split(",");
     addPair(fg, bg, min ?? "4.5", label.join(",").trim() || undefined);
+  } else if (args[i] === "--json") {
+    json = true;
   } else if (args[i] === "--help" || args[i] === "-h") {
-    console.log("usage: check-contrast.mjs [config.json] [--pair fg,bg,min,label]...");
+    console.log("usage: check-contrast.mjs [config.json] [--pair fg,bg,min,label]... [--json]");
     process.exit(0);
   } else {
     let config;
@@ -104,12 +112,23 @@ if (pairs.length === 0) {
 }
 
 // ---- check -----------------------------------------------------------------
+// Text mode prints each pair as it is checked, so a bad color later in the
+// list still leaves the earlier results on screen.
+const results = [];
 let failed = 0;
 for (const { fg, bg, min, label } of pairs) {
-  const r = contrast(resolve(fg), resolve(bg));
+  const fgHex = resolve(fg);
+  const bgHex = resolve(bg);
+  const r = contrast(fgHex, bgHex);
   const ok = r >= min;
   if (!ok) failed++;
-  console.log(`${ok ? "  ok " : "FAIL "} ${r.toFixed(2)}:1 (min ${min}) ${label}`);
+  if (json) results.push({ label, fg: fgHex, bg: bgHex, ratio: Number(r.toFixed(2)), min, pass: ok });
+  else console.log(`${ok ? "  ok " : "FAIL "} ${r.toFixed(2)}:1 (min ${min}) ${label}`);
+}
+
+if (json) {
+  console.log(JSON.stringify(results, null, 2));
+  process.exit(failed ? 1 : 0);
 }
 
 if (failed) {
