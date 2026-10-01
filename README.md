@@ -46,6 +46,7 @@ iclone/
   memory/                  # what it learns and keeps
   scripts/
     setup.sh               # copy skills into whichever tool(s) you use
+    hooks/pr-review-handoff/  # two coding agents review each other's PRs  (optional)
   .github/workflows/
     process-inbox.yml      # run process-inbox on a schedule, open a PR to review
 ```
@@ -101,6 +102,18 @@ that sync.
 is published automatically. Wire your AI tool's CLI and API key into the workflow's one step to turn
 it on. (A scheduler like OpenClaw's can do the same job if you'd rather not use Actions.)
 
+## Let two coding agents review each other's PRs (optional)
+
+`scripts/hooks/pr-review-handoff/` is a small hook for Claude Code and Codex, running in
+[Herdr](https://herdr.dev). When one agent opens a pull request, the other reviews it in the next
+pane and posts its findings. The builder then fixes them and replies on the PR, finding by finding.
+
+```bash
+./scripts/hooks/pr-review-handoff/install.sh
+```
+
+See [its README](scripts/hooks/pr-review-handoff/README.md) for what it needs and what it does.
+
 ## Use it
 
 1. Fork or clone this repo.
@@ -111,7 +124,8 @@ it on. (A scheduler like OpenClaw's can do the same job if you'd rather not use 
 5. Drop raw thoughts into `inbox/` (two examples are included — a blog idea and a product idea).
    Run `process-inbox` yourself, or let the workflow do it on a schedule.
 
-Nothing publishes on its own. The AI drafts; you decide. Always.
+Nothing publishes on its own. The AI drafts; you decide. Always. (The one exception is opt-in: the
+PR review hook posts review comments and replies on your own PRs. It never merges anything.)
 
 ## Licence
 
