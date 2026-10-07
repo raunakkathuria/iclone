@@ -505,8 +505,11 @@ async function worker(builder, eventFile) {
     });
   } catch (error) {
     if (!mayHaveSubmitted) {
-      await releaseReviewSlot(slotKey, pr.url, token);
-      log(`${pr.url}: startup failed; released review reservation`);
+      const released = await releaseReviewSlot(slotKey, pr.url, token).catch((releaseError) => {
+        log(`${pr.url}: release failed: ${releaseError.message}`);
+        return false;
+      });
+      log(`${pr.url}: startup failed; ${released ? 'released' : 'kept'} review reservation`);
     }
     throw error;
   }
@@ -563,7 +566,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   main(process.argv.slice(2)).catch((e) => {
     log(`error: ${e.stack || e.message}`);
     if (process.env.HERDR_ENV === '1' && process.env.HERDR_SOCKET_PATH) {
-      notify('PR review handoff failed', `${e.message.slice(0, 240)} Check ~/.local/state/pr-review-handoff/log.`);
+      notify('PR review handoff failed', `${e.message.slice(0, 240)} Ask another agent to review the full PR URL and post one review comment. Check ~/.local/state/pr-review-handoff/log.`);
     }
   }).finally(() => { process.exitCode = 0; });
 }

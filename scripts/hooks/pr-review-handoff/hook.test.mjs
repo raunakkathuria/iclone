@@ -41,6 +41,17 @@ if(args[0]==='pane' && args[1]==='current') {
 } else if(args[0]==='pane' && args[1]==='layout' && mode==='layout-failed') {
   fail('pane_not_found');
 } else if(args[0]==='agent' && args[1]==='get') {
+  if((mode==='release-false' || mode==='release-throws') && args[2]==='wV:p2') {
+    const state=${JSON.stringify(state)};
+    if(mode==='release-false') {
+      const claim=state+'/handed-off/'+fs.readdirSync(state+'/handed-off')[0];
+      fs.writeFileSync(claim,JSON.stringify({token:'another-worker'}));
+    } else {
+      const starts=state+'/review-starts/'+fs.readdirSync(state+'/review-starts')[0];
+      fs.unlinkSync(starts); fs.mkdirSync(starts);
+    }
+    fail('agent_not_found');
+  }
   if(mode==='startup-failed' && args[2]==='wV:p2') fail('agent_not_found');
   result={agent:{agent_status:'idle'}};
 } else if(args[0]==='agent' && args[1]==='prompt' && args[3].startsWith('Review pull request') && mode==='delivery-unknown') fail('transport_error');
@@ -58,7 +69,7 @@ console.log(JSON.stringify({result}));
       const event = join(dir, 'event.json');
       writeFileSync(event, JSON.stringify({ cwd: dir, session_id: mode === 'wrong-session' ? 'another-session' : 'builder-session', tool_input: { command: 'gh pr create --head feat/repro' }, tool_response: url }));
       const run = spawnSync(process.execPath, [fileURLToPath(new URL('./hook.mjs', import.meta.url)), 'codex', '--worker', event], {
-        env: { ...process.env, ...context, HERDR_ENV: '1', PR_HANDOFF_STATE_DIR: state, HERDR_BIN_PATH: join(bin, 'herdr'), PATH: bin + ':' + process.env.PATH },
+        env: { ...process.env, ...context, HERDR_ENV: '1', PR_REVIEWER: '', PR_REVIEW_MAX_PER_HOUR: '', PR_HANDOFF_STATE_DIR: state, HERDR_BIN_PATH: join(bin, 'herdr'), PATH: bin + ':' + process.env.PATH },
         encoding: 'utf8', timeout: 15000,
       });
       assert.equal(run.status, 0, run.stderr || run.error?.message);
@@ -73,6 +84,7 @@ test('a missing caller is reported without reserving a review or touching anothe
   assert.equal(fixture.claimed(), false);
   assert.equal(fixture.starts().length, 0);
   assert.ok(fixture.calls().some(args => args[0] === 'notification'));
+  assert.ok(fixture.calls().some(args => args[0] === 'notification' && args.some(arg => arg.includes('Ask another agent to review'))));
   assert.ok(fixture.calls().every(args => args[0] === 'notification' || (args[0] === 'pane' && args[1] === 'current')));
 });
 
@@ -120,6 +132,24 @@ test('failed reviewer startup releases the PR and hourly slot for a successful r
   assert.equal(fixture.starts().length, 1);
   assert.match(log, /review posted:/);
   assert.ok(fixture.calls().some(args => args[0] === 'agent' && args[1] === 'prompt' && args[3].startsWith('Review pull request')));
+});
+
+test('a release that returns false is logged as kept', t => {
+  const fixture = workerFixture(t);
+  const log = fixture.run('release-false');
+  assert.match(log, /startup failed; kept review reservation/);
+  assert.doesNotMatch(log, /released review reservation/);
+  assert.match(log, /error: Error: herdr agent get: agent_not_found/);
+  assert.equal(fixture.claimed(), true);
+});
+
+test('a release error does not replace the original startup error', t => {
+  const fixture = workerFixture(t);
+  const log = fixture.run('release-throws');
+  assert.match(log, /release failed:.*EISDIR/);
+  assert.match(log, /startup failed; kept review reservation/);
+  assert.match(log, /error: Error: herdr agent get: agent_not_found/);
+  assert.equal(fixture.claimed(), true);
 });
 
 test('uncertain prompt delivery keeps duplicate protection', t => {
