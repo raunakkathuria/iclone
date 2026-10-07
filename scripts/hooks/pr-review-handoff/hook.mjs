@@ -17,11 +17,11 @@
 //      with what it fixed and what it did not. Herdr notifications tell you when an agent needs you.
 //
 // The hook returns at once. The work runs in a detached process, so the builder never waits.
-// Log: ~/.local/state/pr-review-handoff/log. Any error is logged, never shown to the agent.
+// Log: ~/.local/state/pr-review-handoff/log. Errors also appear as Herdr notifications.
 // Source: https://github.com/raunakkathuria/iclone (scripts/hooks/pr-review-handoff/). MIT.
 // Install or update with install.sh in that folder.
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -186,7 +186,7 @@ export function isReviewerPane(reviewers, socket, pane) {
 
 // The review start times that fall inside the last hour, oldest first.
 export function recentStarts(times = [], now = Date.now()) {
-  return times.filter((t) => now - t < HOUR);
+  return times.filter((t) => now - (typeof t === 'number' ? t : t.at) < HOUR);
 }
 
 // "owner/repo" from a PR URL, so that each repository gets its own reviewer pane.
@@ -283,12 +283,13 @@ export function reviews(pr) {
   } catch { return null; }
 }
 
-// Marks the PR as handed off. Returns false when another run already did it.
-function claimPr(url) {
+// Reserves the PR. Returns false when another worker already reserved it.
+const claimFile = (url) => join(STATE_DIR, 'handed-off', createHash('sha1').update(url).digest('hex'));
+function claimPr(url, token) {
   const dir = join(STATE_DIR, 'handed-off');
   mkdirSync(dir, { recursive: true });
   try {
-    writeFileSync(join(dir, createHash('sha1').update(url).digest('hex')), `${url}\n`, { flag: 'wx' });
+    writeFileSync(claimFile(url), JSON.stringify({ url, token }), { flag: 'wx' });
     return true;
   } catch { return false; }
 }
@@ -323,14 +324,25 @@ function saveStarts(key, times) {
 // start time, all under one lock per pane. Without the lock, workers for PRs made at the same time
 // could all read the same count and all pass. Returns 'ok', 'paused' or 'duplicate'.
 // holdMs is for the test only: it widens the gap between the read and the write.
-export async function takeReviewSlot(slotKey, url, max = MAX_REVIEWS_PER_HOUR, holdMs = 0) {
+export async function takeReviewSlot(slotKey, url, max = MAX_REVIEWS_PER_HOUR, holdMs = 0, token = randomUUID()) {
   return withLock(`slot-${createHash('sha1').update(slotKey).digest('hex')}`, async () => {
     const starts = recentStarts(loadStarts(slotKey));
     if (holdMs) await sleep(holdMs);
     if (starts.length >= max) return 'paused';
-    if (!claimPr(url)) return 'duplicate';
-    saveStarts(slotKey, [...starts, Date.now()]);
+    if (!claimPr(url, token)) return 'duplicate';
+    saveStarts(slotKey, [...starts, { at: Date.now(), token }]);
     return 'ok';
+  });
+}
+// Only the worker that reserved a review can release it before sending a review prompt.
+export async function releaseReviewSlot(slotKey, url, token) {
+  return withLock(`slot-${createHash('sha1').update(slotKey).digest('hex')}`, async () => {
+    let claim;
+    try { claim = JSON.parse(readFileSync(claimFile(url), 'utf8')); } catch { return false; }
+    if (claim.token !== token) return false;
+    saveStarts(slotKey, recentStarts(loadStarts(slotKey)).filter((t) => t.token !== token));
+    rmSync(claimFile(url));
+    return true;
   });
 }
 function saveReviewer(key, paneId) {
@@ -414,9 +426,19 @@ async function worker(builder, eventFile) {
   const event = JSON.parse(readFileSync(eventFile, 'utf8'));
   rmSync(eventFile, { force: true });
   const socket = process.env.HERDR_SOCKET_PATH;
-  const builderPane = process.env.HERDR_PANE_ID;
-  let current = null;
-  try { current = herdr('pane', 'get', builderPane).pane; } catch { /* no pane */ }
+  if (!socket) throw new Error('Herdr socket is missing. Run the builder in a live Herdr pane.');
+  // --current resolves Herdr's caller alias after a pane move. It never uses UI focus.
+  const current = herdr('pane', 'current', '--current').pane;
+  if (!current?.pane_id || !current.workspace_id || current.agent !== builder) {
+    throw new Error(`The caller pane no longer hosts ${builder}. Restart the builder in its Herdr pane.`);
+  }
+  if (event.session_id && current.agent_session?.kind === 'id' && event.session_id !== current.agent_session.value) {
+    throw new Error('The caller pane hosts a different agent session. Restart the builder in its Herdr pane.');
+  }
+  const builderPane = current.pane_id;
+  const workspace = current.workspace_id;
+  process.env.HERDR_PANE_ID = builderPane;
+  process.env.HERDR_WORKSPACE_ID = workspace;
   if (isReviewerPane(loadReviewers(), socket, current)) {
     notify('PR from a reviewer pane', `Pane ${builderPane} is a reviewer, so its PR gets no automatic review.`);
     return log(`skip: gh pr create ran in reviewer pane ${builderPane}`);
@@ -434,7 +456,9 @@ async function worker(builder, eventFile) {
   if (!sameBranch(head, pr.headRefName)) return log(`skip ${pr.url}: its branch ${pr.headRefName} is not ${head}`);
   const age = (Date.now() - Date.parse(pr.createdAt)) / 1000;
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
-  const slot = await takeReviewSlot(`${socket}|${builderPane}`, pr.url);
+  const slotKey = `${socket}|${builderPane}`;
+  const token = randomUUID();
+  const slot = await takeReviewSlot(slotKey, pr.url, MAX_REVIEWS_PER_HOUR, 0, token);
   if (slot === 'paused') {
     notify(`Review loop paused: PR #${pr.number}`, `Pane ${builderPane} reached ${MAX_REVIEWS_PER_HOUR} reviewed PRs in the last hour. Review this one yourself, or raise PR_REVIEW_MAX_PER_HOUR.`);
     return log(`skip ${pr.url}: ${MAX_REVIEWS_PER_HOUR} reviews from ${builderPane} in the last hour`);
@@ -442,39 +466,53 @@ async function worker(builder, eventFile) {
   if (slot === 'duplicate') return log(`skip ${pr.url}: already handed off`);
 
   const tool = reviewerTool(builder, process.env);
-  const workspace = process.env.HERDR_WORKSPACE_ID;
   // One reviewer pane per session, workspace, repository and tool.
   const key = `${socket}|${workspace}|${repoOf(pr.url)}|${tool}`;
   const ctx = { key, workspace, builderPane, tool, dir };
   log(`${pr.url}: built by ${builder}, review by ${tool}`);
   const lockKey = createHash('sha1').update(key).digest('hex');
-  const reviewUrl = await withLock(lockKey, async () => {
-    const who = `${tool} reviewer`;
-    const { pane, fresh } = await getReviewerPane(ctx);
-    if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${pr.url}: reviewer ${pane} never became ready`);
-    if (!fresh) {
-      // Each review starts from an empty context, so it cannot see earlier work.
-      herdr('agent', 'prompt', pane, CLEAR_COMMAND[tool]);
-      await sleep(3000);
-      await waitReady(pane, who, 2 * MINUTE);
+  let mayHaveSubmitted = false;
+  let reviewUrl;
+  try {
+    reviewUrl = await withLock(lockKey, async () => {
+      const who = `${tool} reviewer`;
+      const { pane, fresh } = await getReviewerPane(ctx);
+      if (!(await waitReady(pane, who, 180 * MINUTE))) throw new Error(`${pr.url}: reviewer ${pane} never became ready`);
+      if (!fresh) {
+        // Each review starts from an empty context, so it cannot see earlier work.
+        herdr('agent', 'prompt', pane, CLEAR_COMMAND[tool]);
+        await sleep(3000);
+        if (!(await waitReady(pane, who, 2 * MINUTE))) throw new Error(`${pr.url}: reviewer ${pane} did not become ready after clearing context`);
+      }
+      const before = reviews(pr);
+      // Keep duplicate protection if prompt delivery fails with an uncertain result.
+      mayHaveSubmitted = true;
+      if (!(await sendPrompt(pane, reviewPrompt(pr)))) {
+        notify(`${who} did not start`, `Send the review of ${pr.url} to pane ${pane} yourself.`);
+        return log(`${pr.url}: prompt to ${pane} stalled 3 times`);
+      }
+      log(`${pr.url}: review started in ${pane}`);
+      if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${pr.url}: review still running after 3 hours`);
+      // "Ready" alone does not prove a review: the prompt may have landed on a dialog. A new
+      // review on the PR does.
+      const after = reviews(pr);
+      if (!before || !after || after.count <= before.count) {
+        notify(`No review posted: PR #${pr.number}`, `The ${who} stopped without a new review. Check pane ${pane}.`);
+        return log(`${pr.url}: reviewer ${pane} stopped, but no new review on the PR`);
+      }
+      log(`${pr.url}: review posted: ${after.newest}`);
+      return after.newest;
+    });
+  } catch (error) {
+    if (!mayHaveSubmitted) {
+      const released = await releaseReviewSlot(slotKey, pr.url, token).catch((releaseError) => {
+        log(`${pr.url}: release failed: ${releaseError.message}`);
+        return false;
+      });
+      log(`${pr.url}: startup failed; ${released ? 'released' : 'kept'} review reservation`);
     }
-    const before = reviews(pr);
-    if (!(await sendPrompt(pane, reviewPrompt(pr)))) {
-      notify(`${who} did not start`, `Send the review of ${pr.url} to pane ${pane} yourself.`);
-      return log(`${pr.url}: prompt to ${pane} stalled 3 times`);
-    }
-    log(`${pr.url}: review started in ${pane}`);
-    if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${pr.url}: review still running after 3 hours`);
-    // "Ready" alone does not prove a review: the prompt may have landed on a dialog. A new
-    // review on the PR does.
-    const after = reviews(pr);
-    if (!before || !after || after.count <= before.count) {
-      notify(`No review posted: PR #${pr.number}`, `The ${who} stopped without a new review. Check pane ${pane}.`);
-      return log(`${pr.url}: reviewer ${pane} stopped, but no new review on the PR`);
-    }
-    log(`${pr.url}: review posted: ${after.newest}`);
-    return after.newest;
-  });
+    throw error;
+  }
   // Outside the lock: waiting for a busy builder must not hold up other reviews.
   if (reviewUrl) await handBack(builder, ctx.builderPane, pr, reviewUrl, tool);
 }
@@ -525,5 +563,10 @@ async function main([builder = 'claude', mode, eventFile]) {
 
 // A hook must never break the agent's work: it always exits 0 and prints nothing.
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  main(process.argv.slice(2)).catch((e) => log(`error: ${e.stack || e.message}`)).finally(() => { process.exitCode = 0; });
+  main(process.argv.slice(2)).catch((e) => {
+    log(`error: ${e.stack || e.message}`);
+    if (process.env.HERDR_ENV === '1' && process.env.HERDR_SOCKET_PATH) {
+      notify('PR review handoff failed', `${e.message.slice(0, 240)} Ask another agent to review the full PR URL and post one review comment. Check ~/.local/state/pr-review-handoff/log.`);
+    }
+  }).finally(() => { process.exitCode = 0; });
 }

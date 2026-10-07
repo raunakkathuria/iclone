@@ -67,12 +67,20 @@ Then:
 - The reviewer starts with an empty context each time (`/clear` or `/new`), so it sees only the
   PR, not the builder's work. The builder keeps its context, because it needs it to fix its work.
 - It waits until an agent is idle before it sends a prompt, so it never interrupts work.
+- It finds the builder's pane again, even after you move it. It checks the builder tool
+  and the agent session ID when Herdr provides one. It never chooses the focused pane.
+- A failure before sending the review prompt releases the PR claim and its hourly review slot.
+  Once a prompt may have reached the reviewer, the claim stays in place to prevent duplicate reviews.
 - It does nothing outside Herdr, and nothing for any command except `gh pr create`.
 - The hook itself returns at once. The work runs in a separate process, so the builder never waits.
 
 ## When something goes wrong
 
 - See what the hook did: `tail ~/.local/state/pr-review-handoff/log`.
+- "PR review handoff failed": the hook could not check the builder pane or start the review.
+  If the pane is missing, restart the builder inside the correct Herdr session.
+  Ask another agent to review the full PR URL and post one review comment.
+  Running `gh pr create` again cannot retry an existing PR. There is no automatic retry command.
 - "No review posted": the reviewer stopped without a new review on the PR. A dialog may have
   caught the prompt. Look at the reviewer pane.
 - No reviewer pane opens: start a new agent session, so that it loads the hook, and check that
