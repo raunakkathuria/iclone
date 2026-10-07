@@ -73,6 +73,12 @@ Then:
 ## When something goes wrong
 
 - See what the hook did: `tail ~/.local/state/pr-review-handoff/log`.
+- "PR review handoff failed": the hook could not check the builder pane or start the review.
+  If the pane is missing, restart the builder inside the correct Herdr session.
+- The hook asks Herdr to resolve the caller after a pane move. It checks the builder tool
+  and the agent session ID when Herdr provides one. It never chooses the focused pane.
+- A failure before sending the review prompt releases the PR claim and its hourly review slot.
+  Once a prompt may have reached the reviewer, the claim stays in place to prevent duplicate reviews.
 - "No review posted": the reviewer stopped without a new review on the PR. A dialog may have
   caught the prompt. Look at the reviewer pane.
 - No reviewer pane opens: start a new agent session, so that it loads the hook, and check that

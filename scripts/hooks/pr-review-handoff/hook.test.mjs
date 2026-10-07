@@ -1,12 +1,137 @@
 // Run: node --test scripts/hooks/pr-review-handoff/hook.test.mjs
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { agentName, commandDir, createResult, heredocsOpened, sameBranch, withoutHeredocs, fixPrompt, headBranch, isPrCreate, isReviewerPane, recentStarts, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
+
+function workerFixture(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'prh-worker-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'bin');
+  const state = join(dir, 'state');
+  mkdirSync(bin);
+  mkdirSync(state);
+  const modeFile = join(dir, 'mode');
+  const callsFile = join(dir, 'calls');
+  const apiFile = join(dir, 'api');
+  const url = 'https://github.com/example/repro/pull/1';
+  const context = { HERDR_SOCKET_PATH: '/test.sock', HERDR_PANE_ID: 'wV:p1', HERDR_WORKSPACE_ID: 'wV' };
+  writeFileSync(join(state, 'reviewers.json'), JSON.stringify({ '/test.sock|wV|example/repro|claude': 'wV:p2' }));
+  writeFileSync(join(bin, 'gh'), `#!${process.execPath}\nconst fs=require('node:fs');
+const args=process.argv.slice(2);
+if(args[0]==='pr') console.log(JSON.stringify({url:${JSON.stringify(url)},number:1,state:'OPEN',createdAt:new Date().toISOString(),headRefName:'feat/repro'}));
+else { const n=fs.existsSync(${JSON.stringify(apiFile)})?Number(fs.readFileSync(${JSON.stringify(apiFile)},'utf8')):0; fs.writeFileSync(${JSON.stringify(apiFile)},String(n+1)); console.log(JSON.stringify(n?[{submitted_at:'2026-01-01',html_url:${JSON.stringify(url + '#pullrequestreview-1')}}]:[])); }
+`, { mode: 0o755 });
+  writeFileSync(join(bin, 'herdr'), `#!${process.execPath}\nconst fs=require('node:fs');
+const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(callsFile)},JSON.stringify(args)+'\\n');
+const mode=fs.readFileSync(${JSON.stringify(modeFile)},'utf8');
+function fail(code){ console.error(JSON.stringify({error:{code,message:code}})); process.exit(1); }
+let result={};
+if(args[0]==='pane' && args[1]==='current') {
+  if(mode==='missing') fail('pane_not_found');
+  result={pane:{pane_id:mode==='moved'?'wN:p9':'wV:p1',workspace_id:mode==='moved'?'wN':'wV',agent:mode==='wrong-agent'?'claude':'codex',agent_session:{kind:'id',value:'builder-session'}}};
+} else if(args[0]==='pane' && args[1]==='get') {
+  if(mode==='layout-failed') fail('pane_not_found');
+  result={pane:{pane_id:args[2],workspace_id:args[2].split(':')[0],...(args[2].endsWith(':p2')?{label:'claude review',agent:'claude'}:{agent:'codex'})}};
+} else if(args[0]==='pane' && args[1]==='layout' && mode==='layout-failed') {
+  fail('pane_not_found');
+} else if(args[0]==='agent' && args[1]==='get') {
+  if(mode==='startup-failed' && args[2]==='wV:p2') fail('agent_not_found');
+  result={agent:{agent_status:'idle'}};
+} else if(args[0]==='agent' && args[1]==='prompt' && args[3].startsWith('Review pull request') && mode==='delivery-unknown') fail('transport_error');
+console.log(JSON.stringify({result}));
+`, { mode: 0o755 });
+  return {
+    state,
+    calls: () => existsSync(callsFile) ? readFileSync(callsFile, 'utf8').trim().split('\n').map(JSON.parse) : [],
+    claimed: () => existsSync(join(state, 'handed-off')) && readdirSync(join(state, 'handed-off')).length > 0,
+    starts: () => existsSync(join(state, 'review-starts')) ? readdirSync(join(state, 'review-starts')).flatMap(f => JSON.parse(readFileSync(join(state, 'review-starts', f), 'utf8'))) : [],
+    run(mode) {
+      writeFileSync(modeFile, mode);
+      if (mode === 'moved') writeFileSync(join(state, 'reviewers.json'), JSON.stringify({ '/test.sock|wN|example/repro|claude': 'wN:p2' }));
+      rmSync(apiFile, { force: true });
+      const event = join(dir, 'event.json');
+      writeFileSync(event, JSON.stringify({ cwd: dir, session_id: mode === 'wrong-session' ? 'another-session' : 'builder-session', tool_input: { command: 'gh pr create --head feat/repro' }, tool_response: url }));
+      const run = spawnSync(process.execPath, [fileURLToPath(new URL('./hook.mjs', import.meta.url)), 'codex', '--worker', event], {
+        env: { ...process.env, ...context, HERDR_ENV: '1', PR_HANDOFF_STATE_DIR: state, HERDR_BIN_PATH: join(bin, 'herdr'), PATH: bin + ':' + process.env.PATH },
+        encoding: 'utf8', timeout: 15000,
+      });
+      assert.equal(run.status, 0, run.stderr || run.error?.message);
+      return readFileSync(join(state, 'log'), 'utf8');
+    },
+  };
+}
+
+test('a missing caller is reported without reserving a review or touching another pane', t => {
+  const fixture = workerFixture(t);
+  fixture.run('missing');
+  assert.equal(fixture.claimed(), false);
+  assert.equal(fixture.starts().length, 0);
+  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
+  assert.ok(fixture.calls().every(args => args[0] === 'notification' || (args[0] === 'pane' && args[1] === 'current')));
+});
+
+test('the caller must still host the builder tool', t => {
+  const fixture = workerFixture(t);
+  fixture.run('wrong-agent');
+  assert.equal(fixture.claimed(), false);
+  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
+  assert.ok(!fixture.calls().some(args => args[0] === 'agent'));
+});
+
+test('a different agent session cannot claim the PR', t => {
+  const fixture = workerFixture(t);
+  fixture.run('wrong-session');
+  assert.equal(fixture.claimed(), false);
+  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
+  assert.ok(!fixture.calls().some(args => args[0] === 'agent'));
+});
+
+test('a moved caller uses the pane and workspace resolved by Herdr', t => {
+  const fixture = workerFixture(t);
+  assert.match(fixture.run('moved'), /review posted:/);
+  assert.ok(fixture.calls().some(args => args[0] === 'pane' && args[1] === 'get' && args[2] === 'wN:p9'));
+  assert.ok(fixture.calls().some(args => args[0] === 'agent' && args[1] === 'prompt' && args[2] === 'wN:p2'));
+  assert.ok(!fixture.calls().some(args => args.includes('wV:p1') || args.includes('wV:p2')));
+});
+
+test('a layout failure releases the reservation and reports the error', t => {
+  const fixture = workerFixture(t);
+  assert.match(fixture.run('layout-failed'), /pane_not_found/);
+  assert.equal(fixture.claimed(), false);
+  assert.equal(fixture.starts().length, 0);
+  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
+  assert.ok(!fixture.calls().some(args => args[0] === 'agent' && args[1] === 'prompt'));
+});
+
+test('failed reviewer startup releases the PR and hourly slot for a successful retry', t => {
+  const fixture = workerFixture(t);
+  fixture.run('startup-failed');
+  assert.equal(fixture.claimed(), false);
+  assert.equal(fixture.starts().length, 0);
+  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
+  const log = fixture.run('ok');
+  assert.equal(fixture.claimed(), true);
+  assert.equal(fixture.starts().length, 1);
+  assert.match(log, /review posted:/);
+  assert.ok(fixture.calls().some(args => args[0] === 'agent' && args[1] === 'prompt' && args[3].startsWith('Review pull request')));
+});
+
+test('uncertain prompt delivery keeps duplicate protection', t => {
+  const fixture = workerFixture(t);
+  fixture.run('delivery-unknown');
+  assert.equal(fixture.claimed(), true);
+  assert.equal(fixture.starts().length, 1);
+  const prompts = fixture.calls().filter(args => args[0] === 'agent' && args[1] === 'prompt').length;
+  const log = fixture.run('ok');
+  assert.match(log, /already handed off/);
+  assert.equal(fixture.calls().filter(args => args[0] === 'agent' && args[1] === 'prompt').length, prompts);
+});
 
 const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
 
@@ -147,6 +272,26 @@ test('recentStarts keeps only the last hour', () => {
   const now = 10 * 3_600_000;
   assert.deepEqual(recentStarts([now - 3_700_000, now - 1_000, now - 60_000], now), [now - 1_000, now - 60_000]);
   assert.deepEqual(recentStarts(undefined, now), []);
+  assert.deepEqual(recentStarts([now - 1000, { at: now - 2000, token: 'new' }, { at: now - 3700000, token: 'old' }], now), [now - 1000, { at: now - 2000, token: 'new' }]);
+});
+
+test('a reservation can only be released by its owner', t => {
+  const state = mkdtempSync(join(tmpdir(), 'prh-release-'));
+  t.after(() => rmSync(state, { recursive: true, force: true }));
+  const hook = new URL('./hook.mjs', import.meta.url).href;
+  const code = `const m=await import(${JSON.stringify(hook)});
+const results=[];
+results.push(await m.takeReviewSlot('/s.sock|wV:p1','https://github.com/o/r/pull/1',3,0,'owner'));
+results.push(await m.releaseReviewSlot('/s.sock|wV:p1','https://github.com/o/r/pull/1','other'));
+results.push(await m.takeReviewSlot('/s.sock|wV:p1','https://github.com/o/r/pull/1',3,0,'retry'));
+results.push(await m.releaseReviewSlot('/s.sock|wV:p1','https://github.com/o/r/pull/1','owner'));
+results.push(await m.takeReviewSlot('/s.sock|wV:p1','https://github.com/o/r/pull/1',3,0,'retry'));
+process.stdout.write(JSON.stringify(results));`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, PR_HANDOFF_STATE_DIR: state }, encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), ['ok', false, 'duplicate', true, 'ok']);
+  const [file] = readdirSync(join(state, 'review-starts'));
+  assert.equal(JSON.parse(readFileSync(join(state, 'review-starts', file), 'utf8')).length, 1);
 });
 
 test('takeReviewSlot keeps the hourly limit when workers run at the same time', async () => {
