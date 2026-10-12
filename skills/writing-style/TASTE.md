@@ -51,6 +51,15 @@ hooks, fake vulnerability, an ending built as a crafted slogan.
 Say how you like to close. *Example:* a genuine question or a usable point; a punch line only when it
 genuinely fits, and plain-spoken — never a writerly mic-drop.
 
+## The last read
+
+Before you call a draft done, read it aloud. It passes when it sounds like you talking, not like
+something assembled. Uneven paragraphs, or a sentence that turns mid-thought, are fine when the
+meaning made them. Then check it against "What to avoid" above.
+
+*Example:* every paragraph the same length, every section closing the same way, or an ending built
+as a slogan means the draft needs another pass.
+
 ## Final rule
 
 Don't try to sound impressive. Sound true, useful, and worth reading.

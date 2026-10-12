@@ -20,7 +20,7 @@ publishing on its own.
    - `memory` — a fact worth remembering
    - `discard` — not worth keeping
 3. Act on the label:
-   - `blog` → draft the post with the `writing-style` skill, run `ai-voice-check`, save to `drafts/`
+   - `blog` → draft the post with the `writing-style` skill, read it aloud against "The last read" in its `TASTE.md`, save to `drafts/`
    - `product-idea` → write a short one-pager (problem, who it's for, why now, smallest version) to `ideas/`
    - `task` → add it to your task list
    - `memory` → write a small note to `memory/`

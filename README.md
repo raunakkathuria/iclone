@@ -32,8 +32,6 @@ iclone/
     writing-style/
       SKILL.md             # how to draft
       TASTE.md             # voice and taste  (example template)
-    ai-voice-check/
-      SKILL.md             # audit a draft for AI-sounding drift  (ready to use)
     process-inbox/
       SKILL.md             # classify, label, and draft from the inbox
     web-accessibility/
@@ -60,8 +58,6 @@ writing-style skill. One source of truth per thing.
 - `skills/engineering-leadership/SKILL.md` is a **real, worked example** — one person's engineering
   principles, written out in full. Read it to see how much substance a skill should carry, then
   write your own (or swap in your field if you're not an engineer).
-- `skills/ai-voice-check/SKILL.md` is **ready to use as-is** — a generic auditor that flags
-  AI-sounding drift in any draft.
 - `skills/process-inbox/SKILL.md` is the workflow that classifies and drafts; usable as-is.
 - `skills/web-accessibility/` is **ready to use as-is** — apply WCAG 2 AA to a design system or UI,
   with a zero-dependency contrast validator you can wire into a build so failing colors can't ship.
