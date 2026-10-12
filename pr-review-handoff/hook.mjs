@@ -362,12 +362,16 @@ export async function releaseReviewSlot(slotKey, key, token) {
 }
 
 // Waits until the agent is ready for input. Tells the human once if it is waiting for them.
-async function waitReady(pane, who, timeoutMs) {
+// With checks = 2 the agent must be ready twice in a row, 3 seconds apart: between two of its
+// questions, an agent such as Kiro looks ready for a moment.
+async function waitReady(pane, who, timeoutMs, checks = 1) {
   const end = Date.now() + timeoutMs;
   let told = false;
+  let ready = 0;
   while (Date.now() < end) {
     const status = herdr('agent', 'get', pane).agent.agent_status;
-    if (READY.has(status)) return true;
+    ready = READY.has(status) ? ready + 1 : 0;
+    if (ready >= checks) return true;
     if (status === 'blocked' && !told) {
       notify(`${who} needs you`, `Answer the question in pane ${pane}. The review loop continues after that.`);
       told = true;
@@ -466,7 +470,7 @@ async function runReview(job) {
           return log(`${job.key}: prompt to ${reviewer.pane} stalled 3 times`);
         }
         log(`${job.key}: review started in ${reviewer.pane}`);
-        if (!(await waitReady(reviewer.pane, who, 180 * MINUTE))) return log(`${job.key}: review still running after 3 hours`);
+        if (!(await waitReady(reviewer.pane, who, 180 * MINUTE, 2))) return log(`${job.key}: review still running after 3 hours`);
         // "Ready" alone does not prove a review: the prompt may have landed on a dialog.
         const done = job.after(before);
         if (done) {

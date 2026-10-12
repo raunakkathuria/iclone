@@ -54,6 +54,13 @@ if (group === 'agent') {
       fail('agent_not_found');
     }
     if (reviewer && mode === 'startup-failed') fail('agent_not_found');
+    // In mode flicker, the reviewer looks idle for a moment in the middle of its review, and
+    // writes its findings only after that.
+    if (reviewer && mode === 'flicker' && st.pendingFindings) {
+      st.flicker = (st.flicker ?? 0) + 1;
+      if (st.flicker === 2) { fs.writeFileSync(st.pendingFindings, 'No findings.\n'); delete st.pendingFindings; }
+      out({ agent: { agent_status: st.flicker === 2 ? 'working' : 'idle' } });
+    }
     out({ agent: { agent_status: 'idle' } });
   }
   if (command === 'prompt') {
@@ -63,7 +70,8 @@ if (group === 'agent') {
     const findings = /The only file you write is (\S+\.md)/.exec(args[3]);
     if (findings) st.reviewPrompts = (st.reviewPrompts ?? 0) + 1;
     const dropped = mode === 'drop-first' && st.reviewPrompts === 1;
-    if (findings && mode !== 'no-findings-file' && !dropped) fs.writeFileSync(findings[1], 'No findings.\n');
+    if (findings && mode === 'flicker') st.pendingFindings = findings[1];
+    else if (findings && mode !== 'no-findings-file' && !dropped) fs.writeFileSync(findings[1], 'No findings.\n');
     out({});
   }
 }

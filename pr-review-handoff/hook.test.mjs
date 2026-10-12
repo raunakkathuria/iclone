@@ -265,6 +265,15 @@ test('a review prompt the reviewer dropped is sent again', t => {
   assert.ok(fixture.prompts('wV:p1').some((p) => p.startsWith('claude reviewed your local changes')));
 });
 
+test('a reviewer that looks idle for a moment mid-review is not cut short', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const log = fixture.run('flicker', { kind: 'local', event: { cwd: repo } });
+  assert.match(log, /review done:/);
+  assert.doesNotMatch(log, /sending the prompt again/);
+  assert.equal(fixture.prompts('wV:p2').filter((p) => p.startsWith('Review the local changes')).length, 1);
+});
+
 test('the same local diff is reviewed once', t => {
   const fixture = workerFixture(t);
   const repo = gitRepo(fixture.dir);
