@@ -1,0 +1,17 @@
+id = "raunakkathuria.pair"
+name = "Coder and reviewer"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Every workspace gets a coder pane and a reviewer pane, each with a coding agent"
+platforms = ["macos", "linux"]
+
+# New workspaces, including the ones "herdr worktree create" makes.
+[[events]]
+on = "workspace.created"
+command = ["node", "pair.mjs"]
+
+# Workspaces made before the plugin get the panes the first time you open them.
+# When nothing is missing, it only lists the panes and stops.
+[[events]]
+on = "workspace.focused"
+command = ["node", "pair.mjs"]

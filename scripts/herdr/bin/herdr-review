@@ -1,0 +1,11 @@
+#!/bin/sh
+# herdr-review: asks the reviewer pane to review your local changes (no pull request needed).
+# The coder runs it as its last step. This command only prints a message: the coder tool's
+# shell hook (pr-review-handoff/hook.mjs) sees "herdr-review" and starts the review outside
+# the tool's sandbox. The findings come back to the coder as a new prompt.
+if [ "${HERDR_ENV:-}" != 1 ]; then
+  echo "herdr-review works only inside a Herdr pane."
+  exit 0
+fi
+echo "Review requested. The reviewer pane reviews your local changes now."
+echo "Its findings come back to you as a new prompt. Stop here and wait for them."
