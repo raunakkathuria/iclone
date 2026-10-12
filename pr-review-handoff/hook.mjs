@@ -43,6 +43,8 @@ const MAX_PR_AGE_SECONDS = 600;
 const MAX_REVIEWS_PER_HOUR = Number(process.env.PR_REVIEW_MAX_PER_HOUR) || 3;
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
+// A reviewer that is ready again this soon, with no review, never got the prompt.
+const LOST_PROMPT_MS = Number(process.env.PR_HANDOFF_LOST_PROMPT_MS) || 20_000;
 
 // What the coder is told at the start of each session, so that it asks for a review when done.
 export const CODER_RULE = [
@@ -456,20 +458,29 @@ async function runReview(job) {
       const before = job.before();
       // Keep duplicate protection if prompt delivery fails with an uncertain result.
       mayHaveSubmitted = true;
-      if (!(await sendPrompt(reviewer.pane, job.prompt))) {
-        notify(`${who} did not start`, `Send the review of ${job.title} to pane ${reviewer.pane} yourself.`);
-        return log(`${job.key}: prompt to ${reviewer.pane} stalled 3 times`);
-      }
-      log(`${job.key}: review started in ${reviewer.pane}`);
-      if (!(await waitReady(reviewer.pane, who, 180 * MINUTE))) return log(`${job.key}: review still running after 3 hours`);
-      // "Ready" alone does not prove a review: the prompt may have landed on a dialog.
-      const done = job.after(before);
-      if (!done) {
+      for (let attempt = 1; ; attempt++) {
+        const sent = Date.now();
+        if (!(await sendPrompt(reviewer.pane, job.prompt))) {
+          notify(`${who} did not start`, `Send the review of ${job.title} to pane ${reviewer.pane} yourself.`);
+          return log(`${job.key}: prompt to ${reviewer.pane} stalled 3 times`);
+        }
+        log(`${job.key}: review started in ${reviewer.pane}`);
+        if (!(await waitReady(reviewer.pane, who, 180 * MINUTE))) return log(`${job.key}: review still running after 3 hours`);
+        // "Ready" alone does not prove a review: the prompt may have landed on a dialog.
+        const done = job.after(before);
+        if (done) {
+          log(`${job.key}: review done: ${done}`);
+          return done;
+        }
+        // A real review takes longer than this. Codex, for one, drops the first prompt after /new.
+        if (Date.now() - sent < LOST_PROMPT_MS && attempt < 3) {
+          log(`${job.key}: reviewer ${reviewer.pane} was ready again at once with no review; sending the prompt again`);
+          await sleep(3000);
+          continue;
+        }
         notify(`No review: ${job.title}`, `The ${who} stopped without a review. Check pane ${reviewer.pane}.`);
         return log(`${job.key}: reviewer ${reviewer.pane} stopped, but wrote no review`);
       }
-      log(`${job.key}: review done: ${done}`);
-      return done;
     });
   } catch (error) {
     if (!mayHaveSubmitted) {

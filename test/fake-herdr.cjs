@@ -59,8 +59,11 @@ if (group === 'agent') {
   if (command === 'prompt') {
     if (mode === 'delivery-unknown' && args[3].startsWith('Review pull request')) fail('transport_error');
     // The reviewer of local changes writes its findings file.
+    // In mode drop-first, the first review prompt is lost, as Codex does after /new.
     const findings = /The only file you write is (\S+\.md)/.exec(args[3]);
-    if (findings && mode !== 'no-findings-file') fs.writeFileSync(findings[1], 'No findings.\n');
+    if (findings) st.reviewPrompts = (st.reviewPrompts ?? 0) + 1;
+    const dropped = mode === 'drop-first' && st.reviewPrompts === 1;
+    if (findings && mode !== 'no-findings-file' && !dropped) fs.writeFileSync(findings[1], 'No findings.\n');
     out({});
   }
 }

@@ -236,12 +236,23 @@ test('herdr-review with no changes, or outside git, does nothing', t => {
   assert.equal(fixture.prompts().length, 0);
 });
 
-test('a reviewer that writes no findings file is reported', t => {
+test('a reviewer that writes no findings file is asked 3 times, then reported', t => {
   const fixture = workerFixture(t);
   const repo = gitRepo(fixture.dir);
   assert.match(fixture.run('no-findings-file', { kind: 'local', event: { cwd: repo } }), /wrote no review/);
+  assert.equal(fixture.prompts('wV:p2').filter((p) => p.startsWith('Review the local changes')).length, 3);
   assert.ok(fixture.notified('No review'));
   assert.equal(fixture.prompts('wV:p1').length, 0);
+});
+
+test('a review prompt the reviewer dropped is sent again', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const log = fixture.run('drop-first', { kind: 'local', event: { cwd: repo } });
+  assert.match(log, /ready again at once with no review; sending the prompt again/);
+  assert.match(log, /review done:/);
+  assert.equal(fixture.prompts('wV:p2').filter((p) => p.startsWith('Review the local changes')).length, 2);
+  assert.ok(fixture.prompts('wV:p1').some((p) => p.startsWith('claude reviewed your local changes')));
 });
 
 test('the same local diff is reviewed once', t => {
