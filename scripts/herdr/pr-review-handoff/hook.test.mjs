@@ -1,7 +1,7 @@
 // Run: node --test pr-review-handoff/hook.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -274,6 +274,49 @@ test('a reviewer that looks idle for a moment mid-review is not cut short', t =>
   assert.equal(fixture.prompts('wV:p2').filter((p) => p.startsWith('Review the local changes')).length, 1);
 });
 
+test('a PR made after cd names that checkout in the review prompt', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  fixture.run('ok', { event: { tool_input: { command: 'cd repo && gh pr create --head feat/repro' } } });
+  const review = fixture.prompts('wV:p2').find((p) => p.startsWith('Review pull request'));
+  assert.match(review, new RegExp(`checked out in ${realpathSync(repo)}\\.`));
+  assert.match(review, new RegExp(`Work in ${realpathSync(repo)}: run every command there`));
+});
+
+test('a changed untracked file gets a new review', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  execFileSync('git', ['-C', repo, 'checkout', '--', '.']);
+  writeFileSync(join(repo, 'new.js'), 'export const a = 1;\n');
+  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: repo } }), /review done:/);
+  writeFileSync(join(repo, 'new.js'), 'export const a = 2;\n');
+  const log = fixture.run('ok', { kind: 'local', event: { cwd: repo } });
+  assert.doesNotMatch(log.split('\n').slice(-6).join('\n'), /already handed off/);
+  assert.equal(fixture.prompts('wV:p2').filter((p) => p.startsWith('Review the local changes')).length, 1);
+});
+
+test('a large local diff is still reviewed', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  // About 2 MB of diff: more than the 1 MB that execFileSync buffers by default.
+  writeFileSync(join(repo, 'a.txt'), Array.from({ length: 60000 }, (_, i) => `line ${i} of a large change`).join('\n'));
+  const log = fixture.run('ok', { kind: 'local', event: { cwd: repo } });
+  assert.match(log, /review done:/);
+  assert.doesNotMatch(log, /not a git repository|ENOBUFS/);
+});
+
+test('a git failure is reported as an error, not as "no changes" or "not a git repository"', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const index = join(repo, '.git', 'index');
+  chmodSync(index, 0o000);
+  let log;
+  try { log = fixture.run('ok', { kind: 'local', event: { cwd: repo } }); } finally { chmodSync(index, 0o644); }
+  assert.match(log, /error: Error: git diff failed in /);
+  assert.doesNotMatch(log, /not a git repository|no changes/);
+  assert.ok(fixture.notified('Review handoff failed'));
+});
+
 test('the same local diff is reviewed once', t => {
   const fixture = workerFixture(t);
   const repo = gitRepo(fixture.dir);
@@ -432,8 +475,10 @@ test('headBranch reads --head and -H', () => {
   assert.equal(headBranch('gh pr create -H "feat/y" --fill'), 'feat/y');
 });
 
-test('reviewPrompt names the PR and forbids edits', () => {
-  const text = reviewPrompt({ url: 'https://github.com/o/r/pull/7', number: 7 });
+test('reviewPrompt names the PR and its checkout, and forbids edits', () => {
+  const text = reviewPrompt({ url: 'https://github.com/o/r/pull/7', number: 7 }, '/work/r');
+  assert.match(text, /checked out in \/work\/r\./);
+  assert.match(text, /Work in \/work\/r: run every command there, and first read the AGENTS\.md/);
   assert.match(text, /do not run herdr-review/);
   assert.match(text, /pull\/7/);
   assert.match(text, /gh pr diff https:\/\/github.com\/o\/r\/pull\/7/);

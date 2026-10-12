@@ -18,7 +18,7 @@
 //
 // The hook returns at once. The work runs in a detached process, outside the agent's sandbox.
 // Log: ~/.local/state/pr-review-handoff/log. Errors also appear as Herdr notifications.
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -209,17 +209,21 @@ export function repoOf(url) {
   return /github\.com\/([^/]+\/[^/]+)\/pull\//.exec(url)?.[1] ?? url;
 }
 
-const REVIEWER_RULES = [
-  'You are an independent reviewer: you did not write this change, so judge it only by the code and the repository rules.',
-  'You are not the coder, so do not run herdr-review.',
-  'First read the repository AGENTS.md or CLAUDE.md. If it defines a code-verifier or reviewer role, act as that role.',
-];
+// The reviewer pane starts in the workspace folder, which can be another checkout than the
+// coder's, so every review prompt names the checkout to work in.
+function reviewerRules(root) {
+  return [
+    'You are an independent reviewer: you did not write this change, so judge it only by the code and the repository rules.',
+    'You are not the coder, so do not run herdr-review.',
+    `Work in ${root}: run every command there, and first read the AGENTS.md or CLAUDE.md there. If it defines a code-verifier or reviewer role, act as that role.`,
+  ];
+}
 const FINDINGS = 'Write only actionable findings, ranked P0 (must fix before merge) to P3 (nice to have), each with file:line and a one-line fix.';
 
-export function reviewPrompt(pr) {
+export function reviewPrompt(pr, root) {
   return [
-    `Review pull request ${pr.url} (#${pr.number}).`,
-    ...REVIEWER_RULES,
+    `Review pull request ${pr.url} (#${pr.number}). Its repository is checked out in ${root}.`,
+    ...reviewerRules(root),
     `Use gh pr view ${pr.url} and gh pr diff ${pr.url}. Always pass the full URL, not the number.`,
     'Check correctness, security, tests, and fit with the project rules.',
     'Do not edit, commit or push anything.',
@@ -245,7 +249,7 @@ export function fixPrompt(pr, reviewUrl, reviewer) {
 export function localReviewPrompt({ root, base, file }) {
   return [
     `Review the local changes in the git repository ${root}. They have no pull request.`,
-    ...REVIEWER_RULES,
+    ...reviewerRules(root),
     `See the changes with git -C ${root} status and git -C ${root} diff ${base}. Read new untracked files too.`,
     'Check correctness, security, tests, and fit with the project rules.',
     `Do not edit, commit or push anything. The only file you write is ${file}.`,
@@ -298,21 +302,48 @@ export function reviews(pr) {
   } catch { return null; }
 }
 
-const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args],
+  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }).trim();
+
+// The top folder of the git checkout that holds dir, or null when dir is not in one.
+function gitRoot(dir) {
+  try { return git(dir, 'rev-parse', '--show-toplevel'); } catch { return null; }
+}
+
+// Feeds a git command's output into a hash as it arrives, so a large diff never sits in memory.
+function hashGit(root, args, hash, input = null) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['-C', root, ...args], { stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stdout.on('data', (chunk) => hash.update(chunk));
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`git ${args[0]} failed in ${root}: ${stderr.trim()}`))));
+    if (input !== null) child.stdin.end(input);
+  });
+}
 
 // The local changes to review: everything since the branch left the remote's default branch,
-// committed or not. Null when there is nothing to review.
-function localChanges(dir) {
-  const root = git(dir, 'rev-parse', '--show-toplevel');
+// committed or not, and untracked files. Null when there is nothing to review. The hash covers
+// the diff and the content of each untracked file, so any new change gets a new review.
+// A git failure throws: it is reported, never taken for "no changes".
+async function localChanges(root) {
   let base = 'HEAD';
   for (const ref of ['origin/HEAD', 'origin/main', 'origin/master']) {
     try { base = git(root, 'merge-base', 'HEAD', ref); break; } catch { /* no such ref */ }
   }
-  const diff = git(root, 'diff', base);
-  const untracked = git(root, 'ls-files', '--others', '--exclude-standard');
-  if (!diff && !untracked) return null;
-  const hash = createHash('sha1').update(`${diff}\n${untracked}`).digest('hex');
-  return { root, base, hash };
+  const quiet = spawnSync('git', ['-C', root, 'diff', '--quiet', base], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
+  if (quiet.status !== 0 && quiet.status !== 1) throw new Error(`git diff failed in ${root}: ${(quiet.stderr || quiet.error?.message || '').trim()}`);
+  const untracked = git(root, 'ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean);
+  if (quiet.status === 0 && !untracked.length) return null;
+  const hash = createHash('sha1');
+  await hashGit(root, ['diff', '--binary', base], hash);
+  if (untracked.length) {
+    hash.update(untracked.join('\0'));
+    // git hash-object prints one ID per file, made from the file's content.
+    await hashGit(root, ['hash-object', '--stdin-paths'], hash, `${untracked.join('\n')}\n`);
+  }
+  return { base, hash: hash.digest('hex') };
 }
 
 // Reserves a review. Returns false when another worker already reserved it.
@@ -566,7 +597,7 @@ async function prWorker(tool, event) {
   if (!job) return;
   await runReview({
     ...job,
-    prompt: reviewPrompt(pr),
+    prompt: reviewPrompt(pr, gitRoot(dir) ?? dir),
     before: () => reviews(pr),
     // A new review on the PR proves the review happened. Plain comments do not count.
     after: (before) => {
@@ -579,10 +610,11 @@ async function prWorker(tool, event) {
 
 async function localWorker(tool, event) {
   const dir = commandDir(withoutHeredocs(event.tool_input.command), eventDir(event, process.env), HERDR_REVIEW);
-  let changes;
-  try { changes = localChanges(dir); } catch (e) { return log(`skip herdr-review in ${dir}: not a git repository (${e.message.split('\n')[0]})`); }
-  if (!changes) return log(`skip herdr-review in ${dir}: no changes`);
-  const local = { ...changes, file: join(FINDINGS_DIR, `${Date.now()}-${changes.hash.slice(0, 8)}.md`) };
+  const root = gitRoot(dir);
+  if (!root) return log(`skip herdr-review in ${dir}: not a git repository`);
+  const changes = await localChanges(root);
+  if (!changes) return log(`skip herdr-review in ${root}: no changes`);
+  const local = { root, ...changes, file: join(FINDINGS_DIR, `${Date.now()}-${changes.hash.slice(0, 8)}.md`) };
   const job = await prepare(tool, event, `local:${local.root}:${local.hash}`, `local changes in ${local.root.split('/').at(-1)}`);
   if (!job) return;
   mkdirSync(FINDINGS_DIR, { recursive: true });
