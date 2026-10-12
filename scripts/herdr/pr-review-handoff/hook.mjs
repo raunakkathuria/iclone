@@ -7,8 +7,9 @@
 //
 // Usage (the tool sends its hook event as JSON on stdin):
 //   node hook.mjs claude|codex|kiro          PostToolUse hook after a shell command
-//   node hook.mjs claude|kiro session        SessionStart (Claude, Cursor) or userPromptSubmit
-//                                            (Kiro) hook: tells the coder to run herdr-review
+//   node hook.mjs claude|kiro session        SessionStart (Claude, Cursor, Kiro V3) or
+//                                            userPromptSubmit (Kiro V2) hook: tells the coder to
+//                                            run herdr-review
 //
 // It starts a review after two shell commands:
 //   gh pr create   The reviewer posts one review on the PR. The coder then fixes the findings,
@@ -29,7 +30,7 @@ import {
   startAgent, withLock,
 } from '../lib/herdr.mjs';
 
-// Shell tool names: Claude Code and Codex "Bash", Cursor "Shell", Kiro "shell".
+// Shell tool names: Claude Code and Codex "Bash", Cursor "Shell", Kiro V2 "shell", Kiro V3 "execute_bash".
 const SHELL_TOOLS = new Set(['Bash', 'Shell', 'shell', 'execute_bash']);
 // Only where a command starts, so "gh pr create" inside a quote or a comment does not count.
 const GH_PR_CREATE = /(?:^|[;&|(]|\n)\s*gh\s+pr\s+create\b/;
