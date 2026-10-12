@@ -46,7 +46,7 @@ iclone/
   memory/                  # what it learns and keeps
   scripts/
     setup.sh               # copy skills into whichever tool(s) you use
-    hooks/pr-review-handoff/  # two coding agents review each other's PRs  (optional)
+    herdr/                 # coder + reviewer panes in Herdr, with review handoff  (optional)
   .github/workflows/
     process-inbox.yml      # run process-inbox on a schedule, open a PR to review
 ```
@@ -102,17 +102,18 @@ that sync.
 is published automatically. Wire your AI tool's CLI and API key into the workflow's one step to turn
 it on. (A scheduler like OpenClaw's can do the same job if you'd rather not use Actions.)
 
-## Let two coding agents review each other's PRs (optional)
+## A coder and a reviewer in every Herdr workspace (optional)
 
-`scripts/hooks/pr-review-handoff/` is a small hook for Claude Code and Codex, running in
-[Herdr](https://herdr.dev). When one agent opens a pull request, the other reviews it in the next
-pane and posts its findings. The builder then fixes them and replies on the PR, finding by finding.
+`scripts/herdr/` sets up [Herdr](https://herdr.dev) so that every workspace has a coder pane and a
+reviewer pane, each running a coding agent: Claude Code, Codex, Cursor or Kiro. When the coder opens
+a pull request, or finishes local work, the reviewer reviews it. The coder then fixes the findings.
 
 ```bash
-./scripts/hooks/pr-review-handoff/install.sh
+./scripts/herdr/install.sh
 ```
 
-See [its README](scripts/hooks/pr-review-handoff/README.md) for what it needs and what it does.
+It is separate from `scripts/setup.sh` and installs no skills. See
+[its README](scripts/herdr/README.md) for what it needs and what it does.
 
 ## Use it
 
