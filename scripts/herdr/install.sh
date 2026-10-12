@@ -2,13 +2,15 @@
 # ================================================================
 # install.sh: set up the coder + reviewer workflow for Herdr
 # ================================================================
-# Usage:  ./install.sh        Safe to run again: it only adds or updates its own entries.
+# Usage:  ./scripts/herdr/install.sh   Safe to run again: it updates the copy and its own entries.
 #
 # What it does:
-#   1. Links the Herdr plugin in this folder: every workspace gets a coder and a reviewer pane.
-#   2. Points ~/.agents/hooks/pr-review-handoff at pr-review-handoff/ here (a symlink), and
-#      ~/.local/bin/herdr-review at bin/herdr-review.
-#   3. Registers the hook in each coding tool:
+#   1. Copies this folder to ~/.agents/herdr, so switching branches in the repository never
+#      changes the live setup. Run it again after you change anything here.
+#   2. Links the Herdr plugin in ~/.agents/herdr: every workspace gets a coder and a reviewer pane.
+#   3. Points ~/.agents/hooks/pr-review-handoff at ~/.agents/herdr/pr-review-handoff (a symlink),
+#      and ~/.local/bin/herdr-review at ~/.agents/herdr/bin/herdr-review.
+#   4. Registers the hook in each coding tool:
 #        Claude Code  ~/.claude/settings.json   PostToolUse (Bash) + SessionStart
 #        Cursor       nothing: Cursor runs Claude Code's hooks
 #        Codex        ~/.codex/hooks.json       PostToolUse (Bash), and the coder rule as
@@ -20,7 +22,8 @@
 
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")" && pwd)"
+SRC="$(cd "$(dirname "$0")" && pwd)"
+REPO="$HOME/.agents/herdr"
 HOOK_LINK="$HOME/.agents/hooks/pr-review-handoff"
 HOOK="$HOOK_LINK/hook.mjs"
 
@@ -30,20 +33,25 @@ warn() { echo "[herdr-pair] WARNING: $*" >&2; }
 # Hooks run without the shell's nvm setup, so they need the full node path.
 NODE="$(command -v node || true)"
 [[ -n "$NODE" ]] || { warn "node not found: nothing installed"; exit 1; }
-for tool in herdr python3 gh; do
+for tool in herdr python3 gh rsync; do
   command -v "$tool" >/dev/null || { warn "$tool not found: nothing installed"; exit 1; }
 done
 
 backup() { [[ -e "$1" && ! -e "$1.bak-herdr-pair" ]] && cp -p "$1" "$1.bak-herdr-pair" || true; }
 
-# --- 1. Herdr plugin ---
+# --- 1. Copy ---
+mkdir -p "$REPO"
+rsync -a --delete --exclude .git --exclude test --exclude '*.test.mjs' --exclude review-loop.gif "$SRC/" "$REPO/"
+log "Copied $SRC to $REPO"
+
+# --- 2. Herdr plugin ---
 if herdr plugin list --json 2>/dev/null | grep -q '"raunakkathuria.pair"'; then
   herdr plugin unlink raunakkathuria.pair >/dev/null
 fi
 herdr plugin link "$REPO" >/dev/null
 log "Herdr plugin linked: $REPO"
 
-# --- 2. Links ---
+# --- 3. Links ---
 mkdir -p "$(dirname "$HOOK_LINK")" "$HOME/.local/bin"
 if [[ -d "$HOOK_LINK" && ! -L "$HOOK_LINK" ]]; then
   mv "$HOOK_LINK" "$HOOK_LINK.bak-$(date +%Y%m%d%H%M%S)"
@@ -53,7 +61,7 @@ ln -sfn "$REPO/pr-review-handoff" "$HOOK_LINK"
 ln -sf "$REPO/bin/herdr-review" "$HOME/.local/bin/herdr-review"
 log "Linked $HOOK_LINK and ~/.local/bin/herdr-review"
 
-# --- 3. Hooks in each tool ---
+# --- 4. Hooks in each tool ---
 # Adds an entry only when no entry runs pr-review-handoff/hook.mjs yet, so an entry that a tool
 # has already approved stays exactly as it is.
 register() {
@@ -119,7 +127,7 @@ if command -v kiro-cli >/dev/null; then
 import os, json
 path = os.environ["FILE"]
 cfg = json.load(open(path))
-cfg["description"] = "kiro_default plus the Herdr coder and reviewer hooks (see ~/Documents/personal/herdr)"
+cfg["description"] = "kiro_default plus the Herdr coder and reviewer hooks (see iclone scripts/herdr)"
 hooks = cfg.setdefault("hooks", {})
 for event, entry in (("postToolUse", {"matcher": "shell", "command": os.environ["POST"]}),
                      ("userPromptSubmit", {"command": os.environ["SESSION"]})):

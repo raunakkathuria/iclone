@@ -4,6 +4,8 @@ Every [Herdr](https://herdr.dev) workspace gets two panes: a **coder** and a **r
 coder finishes, its work goes to the reviewer, and the findings come back to the coder. You do
 nothing by hand.
 
+![Claude builds, Codex reviews, Claude fixes and replies](review-loop.gif)
+
 - Defaults: Claude Code codes, Codex reviews. Change them in `config.json`.
 - Any tool works in either pane: Claude Code, Codex, Cursor or Kiro. To switch, quit the tool in
   a pane and start another one there. The next review uses whatever runs in each pane.
@@ -28,27 +30,32 @@ context, because it needs it to fix its own work.
 
 You need Herdr, Node.js 18 or newer, `python3`, and the GitHub CLI (`gh`) logged in.
 
+From the root of this repository:
+
 ```bash
-./install.sh
+./scripts/herdr/install.sh
 ```
 
-Then restart open coding sessions, so they load the hooks. The installer is safe to run again.
-It backs up each file once, to `<file>.bak-herdr-pair`, before it changes it.
+Then restart open coding sessions, so they load the hooks. The installer copies this folder to
+`~/.agents/herdr`, so switching branches here never changes the live setup. Run it again after
+you change anything in this folder. It is safe to run again, and it backs up each file once, to
+`<file>.bak-herdr-pair`, before it changes it. It does not install the skills in `skills/`.
 
 | Tool | What the installer sets up |
 | --- | --- |
-| Herdr | Links this folder as a plugin (`herdr plugin list` shows `raunakkathuria.pair`). |
+| Herdr | Links `~/.agents/herdr` as a plugin (`herdr plugin list` shows `raunakkathuria.pair`). |
 | Claude Code | `PostToolUse` and `SessionStart` hooks in `~/.claude/settings.json`. |
 | Cursor | Nothing: Cursor runs Claude Code's hooks. |
 | Codex | A `PostToolUse` hook in `~/.codex/hooks.json`, and the coder rule as `developer_instructions` in `~/.codex/config.toml`. |
 | Kiro | A `herdr-coder` agent: a copy of `kiro_default` plus the hooks, set as the default agent. |
 
-The hooks run from `~/.agents/hooks/pr-review-handoff`, a symlink to `pr-review-handoff/` here.
-`herdr-review` is a symlink in `~/.local/bin`.
+The hooks run from `~/.agents/hooks/pr-review-handoff`, a symlink to
+`~/.agents/herdr/pr-review-handoff`. `herdr-review` is a symlink in `~/.local/bin`.
 
 ## Change the default tools
 
-Edit `config.json`. The values are Herdr agent kinds, such as `claude`, `codex`, `cursor` or `kiro`.
+Edit `config.json` in this folder, then run `install.sh` again. The values are Herdr agent kinds,
+such as `claude`, `codex`, `cursor` or `kiro`.
 
 ```json
 { "coder": "claude", "reviewer": "codex" }
@@ -79,7 +86,7 @@ An empty reviewer pane gets `reviewer`, unless the coder already runs that tool;
 
 ```bash
 herdr plugin unlink raunakkathuria.pair
-rm ~/.agents/hooks/pr-review-handoff ~/.local/bin/herdr-review
+rm -r ~/.agents/herdr ~/.agents/hooks/pr-review-handoff ~/.local/bin/herdr-review
 kiro-cli agent set-default kiro_default
 ```
 
@@ -89,7 +96,7 @@ and `~/.codex/hooks.json`, and the `herdr-pair` block from `~/.codex/config.toml
 ## Tests
 
 ```bash
-node --test lib/herdr.test.mjs pr-review-handoff/hook.test.mjs
+node --test scripts/herdr/lib/herdr.test.mjs scripts/herdr/pr-review-handoff/hook.test.mjs
 ```
 
 The tests use a fake `herdr` (`test/fake-herdr.cjs`) and a fake `gh`. They change nothing on
