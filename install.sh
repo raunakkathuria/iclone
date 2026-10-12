@@ -113,7 +113,7 @@ PYEOF
 if command -v kiro-cli >/dev/null; then
   KIRO_AGENT="$HOME/.kiro/agents/herdr-coder.json"
   if [[ ! -f "$KIRO_AGENT" ]]; then
-    EDITOR=true VISUAL=true kiro-cli agent create herdr-coder --from kiro_default </dev/null >/dev/null
+    EDITOR=true VISUAL=true kiro-cli agent create herdr-coder --from kiro_default </dev/null >/dev/null 2>&1
   fi
   FILE="$KIRO_AGENT" POST="$NODE $HOOK kiro" SESSION="$NODE $HOOK kiro session" python3 - <<'PYEOF'
 import os, json
@@ -126,9 +126,10 @@ for event, entry in (("postToolUse", {"matcher": "shell", "command": os.environ[
     hooks[event] = [e for e in hooks.get(event, []) if "pr-review-handoff/hook.mjs" not in e.get("command", "")] + [entry]
 json.dump(cfg, open(path, "w"), indent=2)
 PYEOF
-  DEFAULT="$(kiro-cli settings chat.defaultAgent 2>/dev/null | tr -d '"' || true)"
+  # Prints the name, maybe quoted and followed by " (global)", or an error when none is set.
+  DEFAULT="$(kiro-cli settings chat.defaultAgent 2>/dev/null | tr -d '"' | awk '{print $1}' || true)"
   if [[ -z "$DEFAULT" || "$DEFAULT" == *"No value"* || "$DEFAULT" == "kiro_default" ]]; then
-    kiro-cli agent set-default herdr-coder >/dev/null
+    kiro-cli agent set-default herdr-coder >/dev/null 2>&1
     log "Kiro: default agent is now herdr-coder. To undo: kiro-cli agent set-default kiro_default"
   elif [[ "$DEFAULT" != "herdr-coder" ]]; then
     warn "Kiro's default agent is $DEFAULT, so herdr-coder is not the default. Start Kiro with: kiro-cli --agent herdr-coder"

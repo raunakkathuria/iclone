@@ -118,7 +118,17 @@ test('a review request from the reviewer pane is skipped', t => {
   const fixture = workerFixture(t);
   const log = fixture.run('ok', { current: 'wV:p2', event: { session_id: undefined } });
   assert.match(log, /the request came from reviewer pane wV:p2/);
+  assert.ok(fixture.notified('PR from the reviewer pane'));
   assert.equal(fixture.claimed(), false);
+  assert.equal(fixture.prompts().length, 0);
+});
+
+test('herdr-review from the reviewer pane is skipped without a notice', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const log = fixture.run('ok', { kind: 'local', current: 'wV:p2', event: { cwd: repo, session_id: undefined } });
+  assert.match(log, /the request came from reviewer pane wV:p2/);
+  assert.equal(fixture.notified('reviewer pane'), false);
   assert.equal(fixture.prompts().length, 0);
 });
 
@@ -415,6 +425,7 @@ test('headBranch reads --head and -H', () => {
 
 test('reviewPrompt names the PR and forbids edits', () => {
   const text = reviewPrompt({ url: 'https://github.com/o/r/pull/7', number: 7 });
+  assert.match(text, /do not run herdr-review/);
   assert.match(text, /pull\/7/);
   assert.match(text, /gh pr diff https:\/\/github.com\/o\/r\/pull\/7/);
   assert.match(text, /gh pr review https:\/\/github.com\/o\/r\/pull\/7 --comment/);

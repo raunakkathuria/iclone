@@ -52,7 +52,7 @@ export const CODER_RULE = [
   'When you finish a change and do not open a pull request, run `herdr-review` from the repository folder as your last step, then stop.',
   'It sends your local changes to the reviewer, and the findings come back to you as a new prompt.',
   'A pull request you open with `gh pr create` goes to the reviewer on its own, so do not run `herdr-review` for it.',
-  'Do not run `herdr-review` for fixes that a review asked for.',
+  'Do not run `herdr-review` for fixes that a review asked for, and never when your task is to review work.',
 ].join(' ');
 
 const unquote = (s) => s.replace(/^(["'])([\s\S]*)\1$/, '$2');
@@ -211,6 +211,7 @@ export function repoOf(url) {
 
 const REVIEWER_RULES = [
   'You are an independent reviewer: you did not write this change, so judge it only by the code and the repository rules.',
+  'You are not the coder, so do not run herdr-review.',
   'First read the repository AGENTS.md or CLAUDE.md. If it defines a code-verifier or reviewer role, act as that role.',
 ];
 const FINDINGS = 'Write only actionable findings, ranked P0 (must fix before merge) to P3 (nice to have), each with file:line and a one-line fix.';
@@ -525,7 +526,8 @@ async function prepare(tool, event, key, title) {
   process.env.HERDR_PANE_ID = builder.pane_id;
   process.env.HERDR_WORKSPACE_ID = builder.workspace_id;
   if (roleOf(builder.label) === 'reviewer') {
-    notify('Review request from the reviewer pane', `Pane ${builder.pane_id} is the reviewer, so its work gets no automatic review.`);
+    // A PR from the reviewer is unusual, so say so. A herdr-review run there is only noise.
+    if (!key.startsWith('local:')) notify('PR from the reviewer pane', `Pane ${builder.pane_id} is the reviewer, so its PR gets no automatic review.`);
     log(`skip ${key}: the request came from reviewer pane ${builder.pane_id}`);
     return null;
   }
