@@ -1,48 +1,59 @@
 #!/usr/bin/env node
-// pr-review-handoff: after an agent creates a pull request, a different agent reviews it.
-// It works for Claude Code and Codex, and only inside Herdr. Nobody has to name panes or agents.
+// pr-review-handoff: the coder's finished work goes to the reviewer pane, and the findings come
+// back to the coder. It runs inside Herdr, with any coding tool Herdr detects.
+//
+// Each workspace has a pane labelled "coder" and one labelled "reviewer" (the Herdr plugin in
+// this repository makes them). The tool in each pane is whatever runs there now.
 //
 // Usage (the tool sends its hook event as JSON on stdin):
-//   node hook.mjs claude|codex       PostToolUse hook; the argument is the tool that built the PR
+//   node hook.mjs claude|codex|kiro          PostToolUse hook after a shell command
+//   node hook.mjs claude|kiro session        SessionStart (Claude, Cursor) or userPromptSubmit
+//                                            (Kiro) hook: tells the coder to run herdr-review
 //
-// What it does after "gh pr create":
-//   1. Finds the new PR with "gh pr view" in the folder the command ran in.
-//   2. Picks the reviewer tool: the other tool (claude -> codex, codex -> claude),
-//      or PR_REVIEWER=claude|codex to choose one.
-//   3. Reuses the reviewer pane it made before in this workspace, or splits the builder's pane
-//      and starts a new reviewer there. It never prompts a pane it did not make.
-//   4. Clears the reviewer's context and sends the review prompt. The reviewer posts its
-//      findings on the PR.
-//   5. When the builder is free again, asks it to fix the findings, push, and reply on the PR
-//      with what it fixed and what it did not. Herdr notifications tell you when an agent needs you.
+// It starts a review after two shell commands:
+//   gh pr create   The reviewer posts one review on the PR. The coder then fixes the findings,
+//                  pushes, and replies on the PR.
+//   herdr-review   For local work with no PR. The reviewer writes its findings to a file in
+//                  /tmp/herdr-review/, and the coder fixes them.
 //
-// The hook returns at once. The work runs in a detached process, so the builder never waits.
+// The hook returns at once. The work runs in a detached process, outside the agent's sandbox.
 // Log: ~/.local/state/pr-review-handoff/log. Errors also appear as Herdr notifications.
-// Source: https://github.com/raunakkathuria/iclone (scripts/hooks/pr-review-handoff/). MIT.
-// Install or update with install.sh in that folder.
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  CLEAR_COMMAND, STATE_DIR, ensureLayout, herdr, loadConfig, log, notify, pickReviewer, roleOf, sleep,
+  startAgent, withLock,
+} from '../lib/herdr.mjs';
 
-const STATE_DIR = process.env.PR_HANDOFF_STATE_DIR || join(homedir(), '.local/state/pr-review-handoff');
-const SHELL_TOOLS = new Set(['Bash', 'Shell']);
+// Shell tool names: Claude Code and Codex "Bash", Cursor "Shell", Kiro "shell".
+const SHELL_TOOLS = new Set(['Bash', 'Shell', 'shell', 'execute_bash']);
 // Only where a command starts, so "gh pr create" inside a quote or a comment does not count.
 const GH_PR_CREATE = /(?:^|[;&|(]|\n)\s*gh\s+pr\s+create\b/;
-const OTHER_TOOL = { claude: 'codex', codex: 'claude' };
-const CLEAR_COMMAND = { claude: '/clear', codex: '/new' };
+const HERDR_REVIEW = /(?:^|[;&|(]|\n)\s*herdr-review\b/;
 const READY = new Set(['idle', 'done']);
+// Every coding tool may write here, even in a sandbox. PR_HANDOFF_FINDINGS_DIR is for tests.
+const FINDINGS_DIR = process.env.PR_HANDOFF_FINDINGS_DIR || '/tmp/herdr-review';
 // A PR created longer ago than this was not made by the command, which may have failed.
 const MAX_PR_AGE_SECONDS = 600;
-// Loop guard: at most this many reviews per builder pane per hour. PR_REVIEW_MAX_PER_HOUR changes it.
+// Loop guard: at most this many reviews per coder pane per hour. PR_REVIEW_MAX_PER_HOUR changes it.
 const MAX_REVIEWS_PER_HOUR = Number(process.env.PR_REVIEW_MAX_PER_HOUR) || 3;
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
 
+// What the coder is told at the start of each session, so that it asks for a review when done.
+export const CODER_RULE = [
+  'You work in a Herdr workspace as the coder. A reviewer agent runs in the pane labelled "reviewer".',
+  'When you finish a change and do not open a pull request, run `herdr-review` from the repository folder as your last step, then stop.',
+  'It sends your local changes to the reviewer, and the findings come back to you as a new prompt.',
+  'A pull request you open with `gh pr create` goes to the reviewer on its own, so do not run `herdr-review` for it.',
+  'Do not run `herdr-review` for fixes that a review asked for.',
+].join(' ');
+
 const unquote = (s) => s.replace(/^(["'])([\s\S]*)\1$/, '$2');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- Pure helpers (unit-tested in hook.test.mjs) ---
 
@@ -117,14 +128,28 @@ export function withoutHeredocs(command) {
   return kept.join('\n');
 }
 
-export function isPrCreate(event) {
+function shellCommand(event) {
   const command = event?.tool_input?.command;
-  return SHELL_TOOLS.has(event?.tool_name) && typeof command === 'string' && GH_PR_CREATE.test(withoutHeredocs(command));
+  return SHELL_TOOLS.has(event?.tool_name) && typeof command === 'string' ? withoutHeredocs(command) : null;
 }
 
-// The folder "gh pr create" ran in: the event's folder, changed by a "cd X &&" before it.
-export function commandDir(command, cwd) {
-  const at = command.search(GH_PR_CREATE);
+export function isPrCreate(event) {
+  return GH_PR_CREATE.test(shellCommand(event) ?? '');
+}
+
+export function isReviewRequest(event) {
+  return HERDR_REVIEW.test(shellCommand(event) ?? '');
+}
+
+// The folder the command ran in. Cursor sends an empty cwd, so fall back to its tool input and
+// its workspace root.
+export function eventDir(event, env = {}) {
+  return event?.cwd || event?.tool_input?.cwd || env.CLAUDE_PROJECT_DIR || event?.workspace_roots?.[0] || process.cwd();
+}
+
+// The folder a command ran in: the event's folder, changed by a "cd X &&" before it.
+export function commandDir(command, cwd, pattern = GH_PR_CREATE) {
+  const at = command.search(pattern);
   const before = at >= 0 ? command.slice(0, at) : command;
   let dir = cwd;
   // Each cd starts from where the one before it left off: "cd a && cd b" ends in a/b.
@@ -135,12 +160,12 @@ export function commandDir(command, cwd) {
   return dir;
 }
 
-// What "gh pr create" printed, from the tool's result. Each tool keeps it in a different
-// field, so this searches the whole result. "failed" means gh made no new PR. The URL is used
-// only when the output has exactly one PR URL: another command in the same line, such as
-// "gh pr view 3 && gh pr create", can print a different PR first.
+// What "gh pr create" printed, from the tool's result: Cursor calls it tool_output, the others
+// tool_response. "failed" means gh made no new PR. The URL is used only when the output has
+// exactly one PR URL: another command in the same line, such as "gh pr view 3 && gh pr create",
+// can print a different PR first.
 export function createResult(event) {
-  const raw = event?.tool_response;
+  const raw = event?.tool_response ?? event?.tool_output;
   const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
   const urls = [...new Set(text.match(/https:\/\/github\.com\/[^/\s"\\]+\/[^/\s"\\]+\/pull\/\d+/g) ?? [])];
   return { failed: /already exists/i.test(text), url: urls.length === 1 ? urls[0] : null };
@@ -157,31 +182,19 @@ export function headBranch(command) {
   return m ? unquote(m[1]) : null;
 }
 
-export function reviewerTool(builder, env = {}) {
-  const chosen = env.PR_REVIEWER;
-  if (chosen && CLEAR_COMMAND[chosen]) return chosen;
-  return OTHER_TOOL[builder] ?? 'codex';
+// The pane that ran the command. The agent's session ID is the surest match. Then the pane
+// Herdr resolves for the caller, then the pane labelled "coder" in the caller's workspace: the
+// caller's pane ID can be stale, for example after a server restart.
+export function findBuilderPane(panes, { current, sessionId, workspace }) {
+  const bySession = sessionId && panes.find((p) => p.agent_session?.value === sessionId);
+  return bySession || current || panes.find((p) => p.workspace_id === workspace && roleOf(p.label) === 'coder') || null;
 }
 
-// A unique agent name from the pane ID, which Herdr never reuses: "wW:p3" -> "review-codex-ww-p3".
-export function agentName(tool, paneId) {
-  return `review-${tool}-${paneId}`.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 32);
-}
-
-// Split a wide pane to the right and a tall one down. Terminal cells are about twice as tall as wide.
-export function splitDirection(rect) {
-  return rect && rect.width >= rect.height * 2.5 ? 'right' : 'down';
-}
-
-export const reviewLabel = (tool) => `${tool} review`;
-
-// Whether a pane is a reviewer pane this hook opened on this server. A reviewer that opens a PR
-// must not start another review, or reviews could chain without end. The label check keeps a
-// user's pane safe if its ID once belonged to a reviewer pane before a server restart.
-export function isReviewerPane(reviewers, socket, pane) {
-  if (!pane) return false;
-  const saved = Object.entries(reviewers).some(([key, id]) => key.startsWith(`${socket}|`) && id === pane.pane_id);
-  return saved && /^(claude|codex) review$/.test(pane.label ?? '');
+// The reviewer pane in the coder's workspace, the one in the same tab first.
+export function findReviewerPane(panes, builder) {
+  const reviewers = panes.filter((p) => p.pane_id !== builder.pane_id && p.workspace_id === builder.workspace_id
+    && roleOf(p.label) === 'reviewer');
+  return reviewers.find((p) => p.tab_id === builder.tab_id) ?? reviewers[0] ?? null;
 }
 
 // The review start times that fall inside the last hour, oldest first.
@@ -189,35 +202,31 @@ export function recentStarts(times = [], now = Date.now()) {
   return times.filter((t) => now - (typeof t === 'number' ? t : t.at) < HOUR);
 }
 
-// "owner/repo" from a PR URL, so that each repository gets its own reviewer pane.
+// "owner/repo" from a PR URL.
 export function repoOf(url) {
   return /github\.com\/([^/]+\/[^/]+)\/pull\//.exec(url)?.[1] ?? url;
 }
 
-// Whether a saved pane is still the reviewer pane this hook made. The ID alone is not proof:
-// it could belong to another pane after a server restart. So the hook's own label must match too.
-// Returns 'reuse' (the reviewer runs there), 'restart' (the reviewer exited) or null (not ours).
-export function ownReviewerPane(pane, workspace, tool) {
-  if (!pane || pane.workspace_id !== workspace || pane.label !== reviewLabel(tool)) return null;
-  if (pane.agent === tool) return 'reuse';
-  return pane.agent ? null : 'restart';
-}
+const REVIEWER_RULES = [
+  'You are an independent reviewer: you did not write this change, so judge it only by the code and the repository rules.',
+  'First read the repository AGENTS.md or CLAUDE.md. If it defines a code-verifier or reviewer role, act as that role.',
+];
+const FINDINGS = 'Write only actionable findings, ranked P0 (must fix before merge) to P3 (nice to have), each with file:line and a one-line fix.';
 
 export function reviewPrompt(pr) {
   return [
     `Review pull request ${pr.url} (#${pr.number}).`,
-    'You are an independent reviewer: you did not write this change, so judge it only by the code and the repository rules.',
-    'First read the repository AGENTS.md or CLAUDE.md. If it defines a code-verifier or reviewer role, act as that role.',
+    ...REVIEWER_RULES,
     `Use gh pr view ${pr.url} and gh pr diff ${pr.url}. Always pass the full URL, not the number.`,
     'Check correctness, security, tests, and fit with the project rules.',
     'Do not edit, commit or push anything.',
-    'Write only actionable findings, ranked P0 (must fix before merge) to P3 (nice to have), each with file:line and a one-line fix.',
+    FINDINGS,
     `Post them as one review comment with gh pr review ${pr.url} --comment --body-file <file>. If you find nothing, post a review comment that says so, the same way.`,
     'Then reply with the link to your comment.',
   ].join(' ');
 }
 
-// The builder keeps its context: it needs it to fix its own work.
+// The coder keeps its context: it needs it to fix its own work.
 export function fixPrompt(pr, reviewUrl, reviewer) {
   return [
     `${reviewer} reviewed your pull request ${pr.url}. The review: ${reviewUrl}.`,
@@ -230,34 +239,37 @@ export function fixPrompt(pr, reviewUrl, reviewer) {
   ].join(' ');
 }
 
+export function localReviewPrompt({ root, base, file }) {
+  return [
+    `Review the local changes in the git repository ${root}. They have no pull request.`,
+    ...REVIEWER_RULES,
+    `See the changes with git -C ${root} status and git -C ${root} diff ${base}. Read new untracked files too.`,
+    'Check correctness, security, tests, and fit with the project rules.',
+    `Do not edit, commit or push anything. The only file you write is ${file}.`,
+    FINDINGS,
+    `Write them to ${file}. If you find nothing, write "No findings." to that file.`,
+    'Then reply with the path of the file.',
+  ].join(' ');
+}
+
+export function localFixPrompt({ root, file }, reviewer) {
+  return [
+    `${reviewer} reviewed your local changes in ${root}. The findings are in ${file}. Read that file.`,
+    'If it says "No findings.", do nothing more.',
+    'Otherwise, for each finding: fix it, or decide not to and know why.',
+    'Then reply with a short list: each finding by its rank and title, then "fixed" or "not fixed" with the reason.',
+    'Do not run herdr-review for these fixes.',
+  ].join(' ');
+}
+
+// What a session hook prints, so the tool adds the coder rule to its context. Claude Code and
+// Cursor read hookSpecificOutput; Kiro adds plain output to the context.
+export function sessionOutput(tool, rule = CODER_RULE) {
+  if (tool === 'kiro') return `${rule}\n`;
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: rule } });
+}
+
 // --- Side effects ---
-
-function log(message) {
-  try {
-    mkdirSync(STATE_DIR, { recursive: true });
-    appendFileSync(join(STATE_DIR, 'log'), `${new Date().toISOString()} [${process.pid}] ${message}\n`);
-  } catch { /* logging must never fail the hook */ }
-}
-
-const HERDR = process.env.HERDR_BIN_PATH || 'herdr';
-
-// Runs a herdr command and returns its JSON result. Herdr prints errors as JSON on stderr.
-function herdr(...args) {
-  try {
-    const out = execFileSync(HERDR, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    return out.trim() ? JSON.parse(out).result : null;
-  } catch (e) {
-    let code = 'failed';
-    try { code = JSON.parse(e.stderr).error.code; } catch { /* not JSON */ }
-    const error = new Error(`herdr ${args.slice(0, 2).join(' ')}: ${code}: ${String(e.stderr || e.message).trim()}`);
-    error.code = code;
-    throw error;
-  }
-}
-
-function notify(title, body, sound = 'request') {
-  try { herdr('notification', 'show', title, '--body', body, '--sound', sound); } catch (e) { log(e.message); }
-}
 
 async function findPr(dir, head) {
   // GitHub can take a moment to show a new PR, so try a few times.
@@ -271,7 +283,7 @@ async function findPr(dir, head) {
 }
 
 // The PR's reviews: how many, and the link to the newest. Null when gh cannot tell.
-// Plain comments do not count, so another comment, or the builder's reply, is never taken
+// Plain comments do not count, so another comment, or the coder's reply, is never taken
 // for the review.
 export function reviews(pr) {
   try {
@@ -283,35 +295,34 @@ export function reviews(pr) {
   } catch { return null; }
 }
 
-// Reserves the PR. Returns false when another worker already reserved it.
-const claimFile = (url) => join(STATE_DIR, 'handed-off', createHash('sha1').update(url).digest('hex'));
-function claimPr(url, token) {
-  const dir = join(STATE_DIR, 'handed-off');
-  mkdirSync(dir, { recursive: true });
+const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+
+// The local changes to review: everything since the branch left the remote's default branch,
+// committed or not. Null when there is nothing to review.
+function localChanges(dir) {
+  const root = git(dir, 'rev-parse', '--show-toplevel');
+  let base = 'HEAD';
+  for (const ref of ['origin/HEAD', 'origin/main', 'origin/master']) {
+    try { base = git(root, 'merge-base', 'HEAD', ref); break; } catch { /* no such ref */ }
+  }
+  const diff = git(root, 'diff', base);
+  const untracked = git(root, 'ls-files', '--others', '--exclude-standard');
+  if (!diff && !untracked) return null;
+  const hash = createHash('sha1').update(`${diff}\n${untracked}`).digest('hex');
+  return { root, base, hash };
+}
+
+// Reserves a review. Returns false when another worker already reserved it.
+const claimFile = (key) => join(STATE_DIR, 'handed-off', createHash('sha1').update(key).digest('hex'));
+function claim(key, token) {
+  mkdirSync(join(STATE_DIR, 'handed-off'), { recursive: true });
   try {
-    writeFileSync(claimFile(url), JSON.stringify({ url, token }), { flag: 'wx' });
+    writeFileSync(claimFile(key), JSON.stringify({ key, token }), { flag: 'wx' });
     return true;
   } catch { return false; }
 }
 
-// One review at a time per reviewer pane. A lock older than 3 hours is left over from a crash.
-async function withLock(key, work) {
-  const lock = join(STATE_DIR, 'locks', key);
-  mkdirSync(join(STATE_DIR, 'locks'), { recursive: true });
-  for (;;) {
-    try { mkdirSync(lock); break; } catch {
-      try { if (Date.now() - statSync(lock).mtimeMs > 180 * MINUTE) rmSync(lock, { recursive: true, force: true }); } catch { /* gone */ }
-      await sleep(2000);
-    }
-  }
-  try { return await work(); } finally { rmSync(lock, { recursive: true, force: true }); }
-}
-
-// Reviewer panes this hook made, by session, workspace and tool.
-const REVIEWERS_FILE = join(STATE_DIR, 'reviewers.json');
-function loadReviewers() { try { return JSON.parse(readFileSync(REVIEWERS_FILE, 'utf8')); } catch { return {}; } }
-
-// When each builder pane started a review, for the loop guard. One file per pane, so a write for
+// When each coder pane started a review, for the loop guard. One file per pane, so a write for
 // one pane never wipes another pane's times.
 const startsFile = (key) => join(STATE_DIR, 'review-starts', `${createHash('sha1').update(key).digest('hex')}.json`);
 function loadStarts(key) { try { return JSON.parse(readFileSync(startsFile(key), 'utf8')); } catch { return []; } }
@@ -319,36 +330,32 @@ function saveStarts(key, times) {
   mkdirSync(join(STATE_DIR, 'review-starts'), { recursive: true });
   writeFileSync(startsFile(key), JSON.stringify(times));
 }
+const slotLock = (slotKey) => `slot-${createHash('sha1').update(slotKey).digest('hex')}`;
 
-// Takes a review slot for one builder pane: checks the hourly limit, claims the PR, and saves the
-// start time, all under one lock per pane. Without the lock, workers for PRs made at the same time
-// could all read the same count and all pass. Returns 'ok', 'paused' or 'duplicate'.
+// Takes a review slot for one coder pane: checks the hourly limit, claims the review, and saves
+// the start time, all under one lock per pane. Without the lock, workers that start at the same
+// time could all read the same count and all pass. Returns 'ok', 'paused' or 'duplicate'.
 // holdMs is for the test only: it widens the gap between the read and the write.
-export async function takeReviewSlot(slotKey, url, max = MAX_REVIEWS_PER_HOUR, holdMs = 0, token = randomUUID()) {
-  return withLock(`slot-${createHash('sha1').update(slotKey).digest('hex')}`, async () => {
+export async function takeReviewSlot(slotKey, key, max = MAX_REVIEWS_PER_HOUR, holdMs = 0, token = randomUUID()) {
+  return withLock(slotLock(slotKey), async () => {
     const starts = recentStarts(loadStarts(slotKey));
     if (holdMs) await sleep(holdMs);
     if (starts.length >= max) return 'paused';
-    if (!claimPr(url, token)) return 'duplicate';
+    if (!claim(key, token)) return 'duplicate';
     saveStarts(slotKey, [...starts, { at: Date.now(), token }]);
     return 'ok';
   });
 }
 // Only the worker that reserved a review can release it before sending a review prompt.
-export async function releaseReviewSlot(slotKey, url, token) {
-  return withLock(`slot-${createHash('sha1').update(slotKey).digest('hex')}`, async () => {
-    let claim;
-    try { claim = JSON.parse(readFileSync(claimFile(url), 'utf8')); } catch { return false; }
-    if (claim.token !== token) return false;
+export async function releaseReviewSlot(slotKey, key, token) {
+  return withLock(slotLock(slotKey), async () => {
+    let held;
+    try { held = JSON.parse(readFileSync(claimFile(key), 'utf8')); } catch { return false; }
+    if (held.token !== token) return false;
     saveStarts(slotKey, recentStarts(loadStarts(slotKey)).filter((t) => t.token !== token));
-    rmSync(claimFile(url));
+    rmSync(claimFile(key));
     return true;
   });
-}
-function saveReviewer(key, paneId) {
-  const all = loadReviewers();
-  all[key] = paneId;
-  writeFileSync(REVIEWERS_FILE, JSON.stringify(all, null, 2));
 }
 
 // Waits until the agent is ready for input. Tells the human once if it is waiting for them.
@@ -359,28 +366,12 @@ async function waitReady(pane, who, timeoutMs) {
     const status = herdr('agent', 'get', pane).agent.agent_status;
     if (READY.has(status)) return true;
     if (status === 'blocked' && !told) {
-      notify(`${who} needs you`, `Answer the question in pane ${pane}. The PR review loop continues after that.`);
+      notify(`${who} needs you`, `Answer the question in pane ${pane}. The review loop continues after that.`);
       told = true;
     }
     await sleep(3000);
   }
   return false;
-}
-
-// Starts the reviewer tool in a pane that is at a shell prompt. The new shell may still be loading.
-async function startReviewer(pane, tool) {
-  const name = agentName(tool, pane);
-  for (let i = 0; i < 5; i++) {
-    try {
-      herdr('agent', 'start', name, '--kind', tool, '--pane', pane, '--timeout', '60000');
-      await sleep(5000); // Herdr reports ready a little before the agent's input box is
-      return;
-    } catch (e) {
-      if (e.code === 'agent_not_ready') return; // started, but waiting at a question; waitReady handles it
-      if (i === 4) throw e;
-      await sleep(2000);
-    }
-  }
 }
 
 // Sends the prompt and checks that the agent starts working on it. An agent that has only just
@@ -401,50 +392,148 @@ async function sendPrompt(pane, text) {
   return false;
 }
 
-async function getReviewerPane({ key, workspace, builderPane, tool, dir }) {
-  const savedPane = loadReviewers()[key];
-  if (savedPane) {
-    let pane = null;
-    try { pane = herdr('pane', 'get', savedPane).pane; } catch { /* pane closed */ }
-    const state = ownReviewerPane(pane, workspace, tool);
-    if (state === 'reuse') return { pane: savedPane, fresh: false };
-    if (state === 'restart') {
-      await startReviewer(savedPane, tool);
-      return { pane: savedPane, fresh: true };
-    }
-  }
-  const layout = herdr('pane', 'layout', '--pane', builderPane).layout;
-  const rect = layout.panes.find((p) => p.pane_id === builderPane)?.rect;
-  const pane = herdr('pane', 'split', '--pane', builderPane, '--direction', splitDirection(rect), '--cwd', dir, '--no-focus').pane.pane_id;
-  saveReviewer(key, pane);
-  herdr('pane', 'rename', pane, reviewLabel(tool));
-  await startReviewer(pane, tool);
-  return { pane, fresh: true };
+// Finds the coder pane (see findBuilderPane). Throws when there is none.
+function resolveBuilder(event) {
+  let current = null;
+  // --current resolves Herdr's caller alias after a pane move. It never uses UI focus.
+  try { current = herdr('pane', 'current', '--current').pane; } catch (e) { log(`pane current: ${e.code}`); }
+  let panes = [];
+  try { panes = herdr('pane', 'list').panes; } catch (e) { log(`pane list: ${e.code}`); }
+  const pane = findBuilderPane(panes, { current, sessionId: event.session_id, workspace: process.env.HERDR_WORKSPACE_ID });
+  if (!pane?.pane_id || !pane.workspace_id) throw new Error('Could not find the coder pane. Run the coder inside a Herdr pane.');
+  return pane;
 }
 
-async function worker(builder, eventFile) {
-  const event = JSON.parse(readFileSync(eventFile, 'utf8'));
-  rmSync(eventFile, { force: true });
+// The reviewer pane in the coder's workspace, with a tool running. Adds the pane, or starts a
+// tool in it, when that is missing.
+async function getReviewer(builder, builderTool) {
+  const find = () => findReviewerPane(herdr('pane', 'list', '--workspace', builder.workspace_id).panes, builder);
+  let pane = find();
+  let fresh = false;
+  // Another run (the plugin) may hold the layout lock; then wait for it to finish.
+  for (let i = 0; i < 12 && !pane; i++) {
+    if (!(await ensureLayout(builder.workspace_id, loadConfig(), builder.pane_id))) await sleep(5000);
+    pane = find();
+    fresh = true;
+  }
+  if (!pane) throw new Error(`No reviewer pane in workspace ${builder.workspace_id}.`);
+  if (!pane.agent) {
+    await startAgent(pane.pane_id, 'reviewer', pickReviewer(builderTool, loadConfig(), process.env));
+    pane = find();
+    fresh = true;
+  }
+  if (!pane?.agent) throw new Error(`No tool runs in the reviewer pane ${pane?.pane_id}. Start one there.`);
+  return { pane: pane.pane_id, tool: pane.agent, fresh };
+}
+
+// Sends one review to the reviewer pane and hands the result back to the coder.
+// job: { builder, builderTool, slotKey, key, token, title, prompt, before(), after(before), fix(result, reviewer) }
+async function runReview(job) {
   const socket = process.env.HERDR_SOCKET_PATH;
-  if (!socket) throw new Error('Herdr socket is missing. Run the builder in a live Herdr pane.');
-  // --current resolves Herdr's caller alias after a pane move. It never uses UI focus.
-  const current = herdr('pane', 'current', '--current').pane;
-  if (!current?.pane_id || !current.workspace_id || current.agent !== builder) {
-    throw new Error(`The caller pane no longer hosts ${builder}. Restart the builder in its Herdr pane.`);
+  const lockKey = `review-${createHash('sha1').update(`${socket}|${job.builder.workspace_id}`).digest('hex')}`;
+  let mayHaveSubmitted = false;
+  let reviewer;
+  let result;
+  try {
+    // One review at a time per workspace: there is one reviewer pane.
+    result = await withLock(lockKey, async () => {
+      reviewer = await getReviewer(job.builder, job.builderTool);
+      const who = `${reviewer.tool} reviewer`;
+      log(`${job.key}: review by ${reviewer.tool} in ${reviewer.pane}`);
+      if (reviewer.tool === job.builderTool) {
+        notify('Review is not independent', `The reviewer pane ${reviewer.pane} runs ${reviewer.tool}, the same tool as the coder. The review runs anyway.`);
+      }
+      if (!(await waitReady(reviewer.pane, who, 180 * MINUTE))) throw new Error(`${job.key}: reviewer ${reviewer.pane} never became ready`);
+      if (!reviewer.fresh) {
+        // Each review starts from an empty context, so it cannot see earlier work.
+        const clear = CLEAR_COMMAND[reviewer.tool];
+        if (clear) {
+          herdr('agent', 'prompt', reviewer.pane, clear);
+          await sleep(3000);
+          if (!(await waitReady(reviewer.pane, who, 2 * MINUTE))) throw new Error(`${job.key}: reviewer ${reviewer.pane} did not become ready after clearing context`);
+        } else log(`${job.key}: no clear command for ${reviewer.tool}; the reviewer keeps its context`);
+      }
+      const before = job.before();
+      // Keep duplicate protection if prompt delivery fails with an uncertain result.
+      mayHaveSubmitted = true;
+      if (!(await sendPrompt(reviewer.pane, job.prompt))) {
+        notify(`${who} did not start`, `Send the review of ${job.title} to pane ${reviewer.pane} yourself.`);
+        return log(`${job.key}: prompt to ${reviewer.pane} stalled 3 times`);
+      }
+      log(`${job.key}: review started in ${reviewer.pane}`);
+      if (!(await waitReady(reviewer.pane, who, 180 * MINUTE))) return log(`${job.key}: review still running after 3 hours`);
+      // "Ready" alone does not prove a review: the prompt may have landed on a dialog.
+      const done = job.after(before);
+      if (!done) {
+        notify(`No review: ${job.title}`, `The ${who} stopped without a review. Check pane ${reviewer.pane}.`);
+        return log(`${job.key}: reviewer ${reviewer.pane} stopped, but wrote no review`);
+      }
+      log(`${job.key}: review done: ${done}`);
+      return done;
+    });
+  } catch (error) {
+    if (!mayHaveSubmitted) {
+      const released = await releaseReviewSlot(job.slotKey, job.key, job.token).catch((releaseError) => {
+        log(`${job.key}: release failed: ${releaseError.message}`);
+        return false;
+      });
+      log(`${job.key}: startup failed; ${released ? 'released' : 'kept'} review reservation`);
+    }
+    throw error;
   }
-  if (event.session_id && current.agent_session?.kind === 'id' && event.session_id !== current.agent_session.value) {
-    throw new Error('The caller pane hosts a different agent session. Restart the builder in its Herdr pane.');
+  // Outside the lock: waiting for a busy coder must not hold up other reviews.
+  if (result) await handBack(job, result, reviewer.tool);
+}
+
+// Asks the coder to fix the findings. It waits until the coder is free, so it never interrupts
+// work. It prompts whatever tool runs in the coder pane now, even if you switched tools.
+async function handBack(job, result, reviewerTool) {
+  const pane = job.builder.pane_id;
+  let current = null;
+  try { current = herdr('pane', 'get', pane).pane; } catch { /* pane closed */ }
+  if (!current?.agent) {
+    notify(`Review done: ${job.title}`, `No tool runs in the coder pane ${pane}. Fix the findings yourself: ${result}`);
+    return log(`${job.key}: coder ${pane} has no agent; not handed back`);
   }
-  const builderPane = current.pane_id;
-  const workspace = current.workspace_id;
-  process.env.HERDR_PANE_ID = builderPane;
-  process.env.HERDR_WORKSPACE_ID = workspace;
-  if (isReviewerPane(loadReviewers(), socket, current)) {
-    notify('PR from a reviewer pane', `Pane ${builderPane} is a reviewer, so its PR gets no automatic review.`);
-    return log(`skip: gh pr create ran in reviewer pane ${builderPane}`);
+  const who = `${current.agent} coder`;
+  if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${job.key}: coder ${pane} busy for 3 hours; not handed back`);
+  if (!(await sendPrompt(pane, job.fix(result, reviewerTool)))) {
+    notify(`${who} did not start`, `Ask pane ${pane} to fix the review yourself: ${result}`);
+    return log(`${job.key}: fix prompt to ${pane} stalled 3 times`);
   }
+  log(`${job.key}: fixes asked from ${pane} (${current.agent})`);
+  notify(`Review done: ${job.title}`, `${reviewerTool} reviewed it. ${current.agent} is now fixing the findings.`, 'done');
+}
+
+// Finds the coder pane, applies the loop guards and takes a review slot. Returns the job
+// fields, or null when this review must not run.
+async function prepare(tool, event, key, title) {
+  if (!process.env.HERDR_SOCKET_PATH) throw new Error('Herdr socket is missing. Run the coder in a live Herdr pane.');
+  const builder = resolveBuilder(event);
+  const builderTool = builder.agent ?? tool;
+  process.env.HERDR_PANE_ID = builder.pane_id;
+  process.env.HERDR_WORKSPACE_ID = builder.workspace_id;
+  if (roleOf(builder.label) === 'reviewer') {
+    notify('Review request from the reviewer pane', `Pane ${builder.pane_id} is the reviewer, so its work gets no automatic review.`);
+    log(`skip ${key}: the request came from reviewer pane ${builder.pane_id}`);
+    return null;
+  }
+  const slotKey = `${process.env.HERDR_SOCKET_PATH}|${builder.pane_id}`;
+  const token = randomUUID();
+  const slot = await takeReviewSlot(slotKey, key, MAX_REVIEWS_PER_HOUR, 0, token);
+  if (slot === 'paused') {
+    notify(`Review loop paused: ${title}`, `Pane ${builder.pane_id} reached ${MAX_REVIEWS_PER_HOUR} reviews in the last hour. Review this one yourself, or raise PR_REVIEW_MAX_PER_HOUR.`);
+    log(`skip ${key}: ${MAX_REVIEWS_PER_HOUR} reviews from ${builder.pane_id} in the last hour`);
+    return null;
+  }
+  if (slot === 'duplicate') { log(`skip ${key}: already handed off`); return null; }
+  log(`${key}: built by ${builderTool} in ${builder.pane_id}`);
+  return { builder, builderTool, slotKey, key, token, title };
+}
+
+async function prWorker(tool, event) {
   const command = withoutHeredocs(event.tool_input.command);
-  const dir = commandDir(command, event.cwd || process.cwd());
+  const dir = commandDir(command, eventDir(event, process.env));
   // gh prints the new PR's URL; a failed create says the PR "already exists".
   const created = createResult(event);
   if (created.failed) return log(`skip: gh pr create made no new PR in ${dir}`);
@@ -456,84 +545,37 @@ async function worker(builder, eventFile) {
   if (!sameBranch(head, pr.headRefName)) return log(`skip ${pr.url}: its branch ${pr.headRefName} is not ${head}`);
   const age = (Date.now() - Date.parse(pr.createdAt)) / 1000;
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
-  const slotKey = `${socket}|${builderPane}`;
-  const token = randomUUID();
-  const slot = await takeReviewSlot(slotKey, pr.url, MAX_REVIEWS_PER_HOUR, 0, token);
-  if (slot === 'paused') {
-    notify(`Review loop paused: PR #${pr.number}`, `Pane ${builderPane} reached ${MAX_REVIEWS_PER_HOUR} reviewed PRs in the last hour. Review this one yourself, or raise PR_REVIEW_MAX_PER_HOUR.`);
-    return log(`skip ${pr.url}: ${MAX_REVIEWS_PER_HOUR} reviews from ${builderPane} in the last hour`);
-  }
-  if (slot === 'duplicate') return log(`skip ${pr.url}: already handed off`);
-
-  const tool = reviewerTool(builder, process.env);
-  // One reviewer pane per session, workspace, repository and tool.
-  const key = `${socket}|${workspace}|${repoOf(pr.url)}|${tool}`;
-  const ctx = { key, workspace, builderPane, tool, dir };
-  log(`${pr.url}: built by ${builder}, review by ${tool}`);
-  const lockKey = createHash('sha1').update(key).digest('hex');
-  let mayHaveSubmitted = false;
-  let reviewUrl;
-  try {
-    reviewUrl = await withLock(lockKey, async () => {
-      const who = `${tool} reviewer`;
-      const { pane, fresh } = await getReviewerPane(ctx);
-      if (!(await waitReady(pane, who, 180 * MINUTE))) throw new Error(`${pr.url}: reviewer ${pane} never became ready`);
-      if (!fresh) {
-        // Each review starts from an empty context, so it cannot see earlier work.
-        herdr('agent', 'prompt', pane, CLEAR_COMMAND[tool]);
-        await sleep(3000);
-        if (!(await waitReady(pane, who, 2 * MINUTE))) throw new Error(`${pr.url}: reviewer ${pane} did not become ready after clearing context`);
-      }
-      const before = reviews(pr);
-      // Keep duplicate protection if prompt delivery fails with an uncertain result.
-      mayHaveSubmitted = true;
-      if (!(await sendPrompt(pane, reviewPrompt(pr)))) {
-        notify(`${who} did not start`, `Send the review of ${pr.url} to pane ${pane} yourself.`);
-        return log(`${pr.url}: prompt to ${pane} stalled 3 times`);
-      }
-      log(`${pr.url}: review started in ${pane}`);
-      if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${pr.url}: review still running after 3 hours`);
-      // "Ready" alone does not prove a review: the prompt may have landed on a dialog. A new
-      // review on the PR does.
-      const after = reviews(pr);
-      if (!before || !after || after.count <= before.count) {
-        notify(`No review posted: PR #${pr.number}`, `The ${who} stopped without a new review. Check pane ${pane}.`);
-        return log(`${pr.url}: reviewer ${pane} stopped, but no new review on the PR`);
-      }
-      log(`${pr.url}: review posted: ${after.newest}`);
-      return after.newest;
-    });
-  } catch (error) {
-    if (!mayHaveSubmitted) {
-      const released = await releaseReviewSlot(slotKey, pr.url, token).catch((releaseError) => {
-        log(`${pr.url}: release failed: ${releaseError.message}`);
-        return false;
-      });
-      log(`${pr.url}: startup failed; ${released ? 'released' : 'kept'} review reservation`);
-    }
-    throw error;
-  }
-  // Outside the lock: waiting for a busy builder must not hold up other reviews.
-  if (reviewUrl) await handBack(builder, ctx.builderPane, pr, reviewUrl, tool);
+  const job = await prepare(tool, event, pr.url, `PR #${pr.number}`);
+  if (!job) return;
+  await runReview({
+    ...job,
+    prompt: reviewPrompt(pr),
+    before: () => reviews(pr),
+    // A new review on the PR proves the review happened. Plain comments do not count.
+    after: (before) => {
+      const now = reviews(pr);
+      return before && now && now.count > before.count ? now.newest : null;
+    },
+    fix: (reviewUrl, reviewer) => fixPrompt(pr, reviewUrl, reviewer),
+  });
 }
 
-// Asks the builder to fix the findings and reply. It waits until the builder is free, so it
-// never interrupts work. It only prompts the pane that ran "gh pr create", with the same tool.
-async function handBack(builder, pane, pr, reviewUrl, reviewer) {
-  let current = null;
-  try { current = herdr('pane', 'get', pane).pane; } catch { /* pane closed */ }
-  if (current?.agent !== builder) {
-    notify(`Review posted: PR #${pr.number}`, `The ${builder} builder pane is gone. Fix the findings yourself: ${reviewUrl}`);
-    return log(`${pr.url}: builder ${pane} is gone; not handed back`);
-  }
-  const who = `${builder} builder`;
-  if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${pr.url}: builder ${pane} busy for 3 hours; not handed back`);
-  if (!(await sendPrompt(pane, fixPrompt(pr, reviewUrl, reviewer)))) {
-    notify(`${who} did not start`, `Ask pane ${pane} to fix the review yourself: ${reviewUrl}`);
-    return log(`${pr.url}: fix prompt to ${pane} stalled 3 times`);
-  }
-  log(`${pr.url}: fixes asked from ${pane}`);
-  notify(`Review posted: PR #${pr.number}`, `${reviewer} reviewed it. ${builder} is now fixing the findings.`, 'done');
+async function localWorker(tool, event) {
+  const dir = commandDir(withoutHeredocs(event.tool_input.command), eventDir(event, process.env), HERDR_REVIEW);
+  let changes;
+  try { changes = localChanges(dir); } catch (e) { return log(`skip herdr-review in ${dir}: not a git repository (${e.message.split('\n')[0]})`); }
+  if (!changes) return log(`skip herdr-review in ${dir}: no changes`);
+  const local = { ...changes, file: join(FINDINGS_DIR, `${Date.now()}-${changes.hash.slice(0, 8)}.md`) };
+  const job = await prepare(tool, event, `local:${local.root}:${local.hash}`, `local changes in ${local.root.split('/').at(-1)}`);
+  if (!job) return;
+  mkdirSync(FINDINGS_DIR, { recursive: true });
+  await runReview({
+    ...job,
+    prompt: localReviewPrompt(local),
+    before: () => null,
+    after: () => (existsSync(local.file) && statSync(local.file).size > 0 ? local.file : null),
+    fix: (file, reviewer) => localFixPrompt({ ...local, file }, reviewer),
+  });
 }
 
 async function readStdin() {
@@ -543,30 +585,50 @@ async function readStdin() {
 }
 
 // The hook part: checks the event, hands the work to a detached process, and exits at once.
-async function hook(builder) {
+async function hook(tool) {
   const event = JSON.parse((await readStdin()) || '{}');
-  if (!isPrCreate(event)) return;
+  const kind = isPrCreate(event) ? 'pr' : isReviewRequest(event) ? 'local' : null;
+  if (!kind) return;
   if (process.env.HERDR_ENV !== '1' || !process.env.HERDR_PANE_ID || !process.env.HERDR_WORKSPACE_ID) return;
   mkdirSync(STATE_DIR, { recursive: true });
   const eventFile = join(STATE_DIR, `event-${process.pid}-${Date.now()}.json`);
   writeFileSync(eventFile, JSON.stringify(event));
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), builder, '--worker', eventFile], { detached: true, stdio: 'ignore' });
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), tool, `--${kind}-worker`, eventFile], { detached: true, stdio: 'ignore' });
   child.unref();
-  log(`hook: ${builder} ran gh pr create; worker ${child.pid}`);
+  log(`hook: ${tool} ran ${kind === 'pr' ? 'gh pr create' : 'herdr-review'}; pane ${process.env.HERDR_PANE_ID}, socket ${process.env.HERDR_SOCKET_PATH}; worker ${child.pid}`);
 }
 
-async function main([builder = 'claude', mode, eventFile]) {
-  if (!OTHER_TOOL[builder]) return;
-  if (mode === '--worker') await worker(builder, eventFile);
-  else await hook(builder);
+// The session part: gives the coder the rule, inside Herdr only, and never in the reviewer pane.
+async function session(tool) {
+  await readStdin();
+  if (process.env.HERDR_ENV !== '1') return;
+  try {
+    if (roleOf(herdr('pane', 'current', '--current').pane?.label) === 'reviewer') return;
+  } catch { /* unknown pane: give the rule */ }
+  process.stdout.write(sessionOutput(tool));
 }
 
-// A hook must never break the agent's work: it always exits 0 and prints nothing.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+async function main([tool = 'claude', mode, eventFile]) {
+  if (mode === 'session') return session(tool);
+  if (mode === '--pr-worker' || mode === '--local-worker') {
+    const event = JSON.parse(readFileSync(eventFile, 'utf8'));
+    rmSync(eventFile, { force: true });
+    return mode === '--pr-worker' ? prWorker(tool, event) : localWorker(tool, event);
+  }
+  return hook(tool);
+}
+
+// The hook runs through a symlink (~/.agents/hooks/pr-review-handoff), and Node loads the real file.
+function invokedDirectly() {
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; }
+}
+
+// A hook must never break the agent's work: it always exits 0, and prints only the session rule.
+if (invokedDirectly()) {
   main(process.argv.slice(2)).catch((e) => {
     log(`error: ${e.stack || e.message}`);
     if (process.env.HERDR_ENV === '1' && process.env.HERDR_SOCKET_PATH) {
-      notify('PR review handoff failed', `${e.message.slice(0, 240)} Ask another agent to review the full PR URL and post one review comment. Check ~/.local/state/pr-review-handoff/log.`);
+      notify('Review handoff failed', `${e.message.slice(0, 240)} Ask the reviewer pane to review it yourself. Check ~/.local/state/pr-review-handoff/log.`);
     }
   }).finally(() => { process.exitCode = 0; });
 }

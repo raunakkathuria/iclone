@@ -1,115 +1,153 @@
-// Run: node --test scripts/hooks/pr-review-handoff/hook.test.mjs
+// Run: node --test pr-review-handoff/hook.test.mjs
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { agentName, commandDir, createResult, heredocsOpened, sameBranch, withoutHeredocs, fixPrompt, headBranch, isPrCreate, isReviewerPane, recentStarts, ownReviewerPane, repoOf, reviewerTool, reviewPrompt, splitDirection } from './hook.mjs';
+import {
+  CODER_RULE, commandDir, createResult, eventDir, findBuilderPane, findReviewerPane, fixPrompt, headBranch, heredocsOpened,
+  isPrCreate, isReviewRequest, localFixPrompt, localReviewPrompt, recentStarts, repoOf, reviewPrompt, sameBranch,
+  sessionOutput, withoutHeredocs,
+} from './hook.mjs';
 
+const HOOK = fileURLToPath(new URL('./hook.mjs', import.meta.url));
+const FAKE_HERDR = fileURLToPath(new URL('../test/fake-herdr.cjs', import.meta.url));
+const URL_ = 'https://github.com/example/repro/pull/1';
+
+// A coder pane running codex and a reviewer pane running claude, in workspace wV.
+const PANES = () => [
+  { pane_id: 'wV:p1', workspace_id: 'wV', tab_id: 'wV:t1', label: 'coder', agent: 'codex', agent_session: { kind: 'id', value: 'builder-session' }, cwd: '/repo' },
+  { pane_id: 'wV:p2', workspace_id: 'wV', tab_id: 'wV:t1', label: 'reviewer', agent: 'claude', cwd: '/repo' },
+];
+
+// Runs the worker against a fake herdr and a fake gh. Returns the log, and the herdr calls.
 function workerFixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'prh-worker-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, 'bin');
   const state = join(dir, 'state');
+  const findings = join(dir, 'findings');
   mkdirSync(bin);
   mkdirSync(state);
-  const modeFile = join(dir, 'mode');
-  const callsFile = join(dir, 'calls');
+  const herdrState = join(dir, 'herdr.json');
   const apiFile = join(dir, 'api');
-  const url = 'https://github.com/example/repro/pull/1';
-  const context = { HERDR_SOCKET_PATH: '/test.sock', HERDR_PANE_ID: 'wV:p1', HERDR_WORKSPACE_ID: 'wV' };
-  writeFileSync(join(state, 'reviewers.json'), JSON.stringify({ '/test.sock|wV|example/repro|claude': 'wV:p2' }));
   writeFileSync(join(bin, 'gh'), `#!${process.execPath}\nconst fs=require('node:fs');
 const args=process.argv.slice(2);
-if(args[0]==='pr') console.log(JSON.stringify({url:${JSON.stringify(url)},number:1,state:'OPEN',createdAt:new Date().toISOString(),headRefName:'feat/repro'}));
-else { const n=fs.existsSync(${JSON.stringify(apiFile)})?Number(fs.readFileSync(${JSON.stringify(apiFile)},'utf8')):0; fs.writeFileSync(${JSON.stringify(apiFile)},String(n+1)); console.log(JSON.stringify(n?[{submitted_at:'2026-01-01',html_url:${JSON.stringify(url + '#pullrequestreview-1')}}]:[])); }
+if(args[0]==='pr') console.log(JSON.stringify({url:${JSON.stringify(URL_)},number:1,state:'OPEN',createdAt:new Date().toISOString(),headRefName:'feat/repro'}));
+else { const n=fs.existsSync(${JSON.stringify(apiFile)})?Number(fs.readFileSync(${JSON.stringify(apiFile)},'utf8')):0; fs.writeFileSync(${JSON.stringify(apiFile)},String(n+1)); console.log(JSON.stringify(n?[{submitted_at:'2026-01-01',html_url:${JSON.stringify(URL_ + '#pullrequestreview-1')}}]:[])); }
 `, { mode: 0o755 });
-  writeFileSync(join(bin, 'herdr'), `#!${process.execPath}\nconst fs=require('node:fs');
-const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(callsFile)},JSON.stringify(args)+'\\n');
-const mode=fs.readFileSync(${JSON.stringify(modeFile)},'utf8');
-function fail(code){ console.error(JSON.stringify({error:{code,message:code}})); process.exit(1); }
-let result={};
-if(args[0]==='pane' && args[1]==='current') {
-  if(mode==='missing') fail('pane_not_found');
-  result={pane:{pane_id:mode==='moved'?'wN:p9':'wV:p1',workspace_id:mode==='moved'?'wN':'wV',agent:mode==='wrong-agent'?'claude':'codex',agent_session:{kind:'id',value:'builder-session'}}};
-} else if(args[0]==='pane' && args[1]==='get') {
-  if(mode==='layout-failed') fail('pane_not_found');
-  result={pane:{pane_id:args[2],workspace_id:args[2].split(':')[0],...(args[2].endsWith(':p2')?{label:'claude review',agent:'claude'}:{agent:'codex'})}};
-} else if(args[0]==='pane' && args[1]==='layout' && mode==='layout-failed') {
-  fail('pane_not_found');
-} else if(args[0]==='agent' && args[1]==='get') {
-  if((mode==='release-false' || mode==='release-throws') && args[2]==='wV:p2') {
-    const state=${JSON.stringify(state)};
-    if(mode==='release-false') {
-      const claim=state+'/handed-off/'+fs.readdirSync(state+'/handed-off')[0];
-      fs.writeFileSync(claim,JSON.stringify({token:'another-worker'}));
-    } else {
-      const starts=state+'/review-starts/'+fs.readdirSync(state+'/review-starts')[0];
-      fs.unlinkSync(starts); fs.mkdirSync(starts);
-    }
-    fail('agent_not_found');
-  }
-  if(mode==='startup-failed' && args[2]==='wV:p2') fail('agent_not_found');
-  result={agent:{agent_status:'idle'}};
-} else if(args[0]==='agent' && args[1]==='prompt' && args[3].startsWith('Review pull request') && mode==='delivery-unknown') fail('transport_error');
-console.log(JSON.stringify({result}));
-`, { mode: 0o755 });
+  const herdr = () => JSON.parse(readFileSync(herdrState, 'utf8'));
   return {
+    dir,
     state,
-    calls: () => existsSync(callsFile) ? readFileSync(callsFile, 'utf8').trim().split('\n').map(JSON.parse) : [],
+    findings,
+    calls: () => herdr().calls,
+    panes: () => herdr().panes,
+    prompts: (pane) => herdr().calls.filter((a) => a[0] === 'agent' && a[1] === 'prompt' && (!pane || a[2] === pane)).map((a) => a[3]),
+    notified: (text) => herdr().calls.some((a) => a[0] === 'notification' && a.some((x) => x.includes(text))),
     claimed: () => existsSync(join(state, 'handed-off')) && readdirSync(join(state, 'handed-off')).length > 0,
-    starts: () => existsSync(join(state, 'review-starts')) ? readdirSync(join(state, 'review-starts')).flatMap(f => JSON.parse(readFileSync(join(state, 'review-starts', f), 'utf8'))) : [],
-    run(mode) {
-      writeFileSync(modeFile, mode);
-      if (mode === 'moved') writeFileSync(join(state, 'reviewers.json'), JSON.stringify({ '/test.sock|wN|example/repro|claude': 'wN:p2' }));
+    starts: () => existsSync(join(state, 'review-starts')) ? readdirSync(join(state, 'review-starts')).flatMap((f) => JSON.parse(readFileSync(join(state, 'review-starts', f), 'utf8'))) : [],
+    // kind 'pr' runs the gh pr create worker; 'local' runs the herdr-review worker.
+    run(mode, { tool = 'codex', panes = PANES(), current = 'wV:p1', kind = 'pr', event = {}, keepHerdr = false } = {}) {
+      if (!keepHerdr || !existsSync(herdrState)) writeFileSync(herdrState, JSON.stringify({ mode, current, panes, next: 3, calls: [] }));
+      else writeFileSync(herdrState, JSON.stringify({ ...herdr(), mode }));
       rmSync(apiFile, { force: true });
-      const event = join(dir, 'event.json');
-      writeFileSync(event, JSON.stringify({ cwd: dir, session_id: mode === 'wrong-session' ? 'another-session' : 'builder-session', tool_input: { command: 'gh pr create --head feat/repro' }, tool_response: url }));
-      const run = spawnSync(process.execPath, [fileURLToPath(new URL('./hook.mjs', import.meta.url)), 'codex', '--worker', event], {
-        env: { ...process.env, ...context, HERDR_ENV: '1', PR_REVIEWER: '', PR_REVIEW_MAX_PER_HOUR: '', PR_HANDOFF_STATE_DIR: state, HERDR_BIN_PATH: join(bin, 'herdr'), PATH: bin + ':' + process.env.PATH },
-        encoding: 'utf8', timeout: 15000,
+      const eventFile = join(dir, 'event.json');
+      const base = kind === 'pr'
+        ? { cwd: dir, session_id: 'builder-session', tool_name: 'Bash', tool_input: { command: 'gh pr create --head feat/repro' }, tool_response: URL_ }
+        : { cwd: dir, session_id: 'builder-session', tool_name: 'Bash', tool_input: { command: 'herdr-review' }, tool_response: 'Review requested.' };
+      writeFileSync(eventFile, JSON.stringify({ ...base, ...event }));
+      const run = spawnSync(process.execPath, [HOOK, tool, `--${kind}-worker`, eventFile], {
+        env: {
+          ...process.env, HERDR_ENV: '1', HERDR_SOCKET_PATH: '/test.sock', HERDR_PANE_ID: current, HERDR_WORKSPACE_ID: current.split(':')[0],
+          PR_REVIEWER: '', PR_REVIEW_MAX_PER_HOUR: '', PR_HANDOFF_STATE_DIR: state, PR_HANDOFF_FINDINGS_DIR: findings,
+          HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, PATH: `${bin}:${process.env.PATH}`,
+        },
+        encoding: 'utf8', timeout: 40000,
       });
       assert.equal(run.status, 0, run.stderr || run.error?.message);
-      return readFileSync(join(state, 'log'), 'utf8');
+      return existsSync(join(state, 'log')) ? readFileSync(join(state, 'log'), 'utf8') : '';
     },
   };
 }
 
-test('a missing caller is reported without reserving a review or touching another pane', t => {
+test('a PR goes to the reviewer pane, and the fix prompt back to the coder', t => {
   const fixture = workerFixture(t);
-  fixture.run('missing');
-  assert.equal(fixture.claimed(), false);
-  assert.equal(fixture.starts().length, 0);
-  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
-  assert.ok(fixture.calls().some(args => args[0] === 'notification' && args.some(arg => arg.includes('Ask another agent to review'))));
-  assert.ok(fixture.calls().every(args => args[0] === 'notification' || (args[0] === 'pane' && args[1] === 'current')));
+  const log = fixture.run('ok');
+  assert.match(log, /built by codex in wV:p1/);
+  assert.match(log, /review by claude in wV:p2/);
+  assert.match(log, /review done: .*pullrequestreview-1/);
+  assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review pull request')));
+  assert.ok(fixture.prompts('wV:p1').some((p) => p.startsWith('claude reviewed your pull request')));
+  // A reviewer with an agent already running starts from a clean context.
+  assert.ok(fixture.prompts('wV:p2').includes('/clear'));
+  assert.equal(fixture.notified('not independent'), false);
 });
 
-test('the caller must still host the builder tool', t => {
+test('the coder tool comes from Herdr, not from the hook argument', t => {
+  // Cursor runs Claude Code's hooks, so the argument can say claude while codex runs in the pane.
   const fixture = workerFixture(t);
-  fixture.run('wrong-agent');
-  assert.equal(fixture.claimed(), false);
-  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
-  assert.ok(!fixture.calls().some(args => args[0] === 'agent'));
+  assert.match(fixture.run('ok', { tool: 'claude' }), /built by codex in wV:p1/);
 });
 
-test('a different agent session cannot claim the PR', t => {
+test('a stale caller pane falls back to the pane with the same agent session', t => {
   const fixture = workerFixture(t);
-  fixture.run('wrong-session');
-  assert.equal(fixture.claimed(), false);
-  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
-  assert.ok(!fixture.calls().some(args => args[0] === 'agent'));
+  const log = fixture.run('missing');
+  assert.match(log, /built by codex in wV:p1/);
+  assert.match(log, /review done:/);
 });
 
-test('a moved caller uses the pane and workspace resolved by Herdr', t => {
+test('without a session match, the pane labelled coder is the coder', t => {
   const fixture = workerFixture(t);
-  assert.match(fixture.run('moved'), /review posted:/);
-  assert.ok(fixture.calls().some(args => args[0] === 'pane' && args[1] === 'get' && args[2] === 'wN:p9'));
-  assert.ok(fixture.calls().some(args => args[0] === 'agent' && args[1] === 'prompt' && args[2] === 'wN:p2'));
-  assert.ok(!fixture.calls().some(args => args.includes('wV:p1') || args.includes('wV:p2')));
+  const log = fixture.run('missing', { event: { session_id: undefined } });
+  assert.match(log, /built by codex in wV:p1/);
+});
+
+test('a moved coder uses the pane and workspace resolved by Herdr', t => {
+  const fixture = workerFixture(t);
+  const panes = PANES().map((p) => ({ ...p, pane_id: p.pane_id.replace('wV', 'wN'), workspace_id: 'wN', tab_id: 'wN:t1' }));
+  panes[0].pane_id = 'wN:p9';
+  const log = fixture.run('ok', { panes, current: 'wN:p9' });
+  assert.match(log, /review by claude in wN:p2/);
+  assert.ok(fixture.prompts('wN:p9').length > 0);
+});
+
+test('a review request from the reviewer pane is skipped', t => {
+  const fixture = workerFixture(t);
+  const log = fixture.run('ok', { current: 'wV:p2', event: { session_id: undefined } });
+  assert.match(log, /the request came from reviewer pane wV:p2/);
+  assert.equal(fixture.claimed(), false);
+  assert.equal(fixture.prompts().length, 0);
+});
+
+test('the same tool in both panes still reviews, with a notice', t => {
+  const fixture = workerFixture(t);
+  const panes = PANES();
+  panes[1].agent = 'codex';
+  assert.match(fixture.run('ok', { panes }), /review done:/);
+  assert.ok(fixture.notified('not independent'));
+  assert.ok(fixture.prompts('wV:p2').includes('/new'));
+});
+
+test('a workspace without a reviewer pane gets one, with the other tool', t => {
+  const fixture = workerFixture(t);
+  const log = fixture.run('ok', { panes: PANES().slice(0, 1) });
+  assert.match(log, /review by claude in wV:p3/);
+  const split = fixture.calls().find((a) => a[0] === 'pane' && a[1] === 'split');
+  assert.deepEqual(split.slice(split.indexOf('--pane'), split.indexOf('--pane') + 2), ['--pane', 'wV:p1']);
+  assert.equal(fixture.panes().find((p) => p.pane_id === 'wV:p3').label, 'reviewer');
+  // A new reviewer has an empty context already.
+  assert.ok(!fixture.prompts('wV:p3').includes('/clear'));
+});
+
+test('an empty reviewer pane gets a tool before the review', t => {
+  const fixture = workerFixture(t);
+  const panes = PANES();
+  delete panes[1].agent;
+  assert.match(fixture.run('ok', { panes }), /review by claude in wV:p2/);
+  assert.ok(fixture.calls().some((a) => a[0] === 'agent' && a[1] === 'start' && a.includes('claude') && a.includes('wV:p2')));
 });
 
 test('a layout failure releases the reservation and reports the error', t => {
@@ -117,8 +155,8 @@ test('a layout failure releases the reservation and reports the error', t => {
   assert.match(fixture.run('layout-failed'), /pane_not_found/);
   assert.equal(fixture.claimed(), false);
   assert.equal(fixture.starts().length, 0);
-  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
-  assert.ok(!fixture.calls().some(args => args[0] === 'agent' && args[1] === 'prompt'));
+  assert.ok(fixture.notified('Review handoff failed'));
+  assert.equal(fixture.prompts().length, 0);
 });
 
 test('failed reviewer startup releases the PR and hourly slot for a successful retry', t => {
@@ -126,12 +164,11 @@ test('failed reviewer startup releases the PR and hourly slot for a successful r
   fixture.run('startup-failed');
   assert.equal(fixture.claimed(), false);
   assert.equal(fixture.starts().length, 0);
-  assert.ok(fixture.calls().some(args => args[0] === 'notification'));
+  assert.ok(fixture.notified('Review handoff failed'));
   const log = fixture.run('ok');
   assert.equal(fixture.claimed(), true);
   assert.equal(fixture.starts().length, 1);
-  assert.match(log, /review posted:/);
-  assert.ok(fixture.calls().some(args => args[0] === 'agent' && args[1] === 'prompt' && args[3].startsWith('Review pull request')));
+  assert.match(log, /review done:/);
 });
 
 test('a release that returns false is logged as kept', t => {
@@ -157,10 +194,139 @@ test('uncertain prompt delivery keeps duplicate protection', t => {
   fixture.run('delivery-unknown');
   assert.equal(fixture.claimed(), true);
   assert.equal(fixture.starts().length, 1);
-  const prompts = fixture.calls().filter(args => args[0] === 'agent' && args[1] === 'prompt').length;
   const log = fixture.run('ok');
   assert.match(log, /already handed off/);
-  assert.equal(fixture.calls().filter(args => args[0] === 'agent' && args[1] === 'prompt').length, prompts);
+  assert.equal(fixture.prompts().filter((p) => p.startsWith('Review pull request')).length, 0);
+});
+
+// A git repository with one commit and one uncommitted change.
+function gitRepo(dir) {
+  const repo = join(dir, 'repo');
+  mkdirSync(repo);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { stdio: 'ignore' });
+  git('init', '-q');
+  writeFileSync(join(repo, 'a.txt'), 'one\n');
+  git('add', '.');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'first');
+  writeFileSync(join(repo, 'a.txt'), 'two\n');
+  return repo;
+}
+
+test('herdr-review sends the local diff to the reviewer, and the findings file back to the coder', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const log = fixture.run('ok', { kind: 'local', event: { cwd: repo } });
+  assert.match(log, /review by claude in wV:p2/);
+  const review = fixture.prompts('wV:p2').find((p) => p.startsWith('Review the local changes'));
+  // No remote, so the base is HEAD: the review covers the uncommitted change. Git gives the real path.
+  assert.ok(review.includes(`git -C ${realpathSync(repo)} diff HEAD`), review);
+  const [file] = readdirSync(fixture.findings);
+  assert.equal(readFileSync(join(fixture.findings, file), 'utf8'), 'No findings.\n');
+  const fix = fixture.prompts('wV:p1').find((p) => p.startsWith('claude reviewed your local changes'));
+  assert.ok(fix.includes(join(fixture.findings, file)));
+  assert.match(fix, /Do not run herdr-review for these fixes/);
+});
+
+test('herdr-review with no changes, or outside git, does nothing', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  execFileSync('git', ['-C', repo, 'checkout', '--', '.']);
+  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: repo } }), /skip herdr-review in .*: no changes/);
+  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: fixture.findings.replace('findings', 'bin') } }), /not a git repository/);
+  assert.equal(fixture.prompts().length, 0);
+});
+
+test('a reviewer that writes no findings file is reported', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  assert.match(fixture.run('no-findings-file', { kind: 'local', event: { cwd: repo } }), /wrote no review/);
+  assert.ok(fixture.notified('No review'));
+  assert.equal(fixture.prompts('wV:p1').length, 0);
+});
+
+test('the same local diff is reviewed once', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  fixture.run('ok', { kind: 'local', event: { cwd: repo } });
+  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: repo } }), /already handed off/);
+});
+
+// Runs the session hook with a fake herdr where the caller pane has the given label.
+function runSession(t, tool, label, env = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'prh-session-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const herdrState = join(dir, 'herdr.json');
+  writeFileSync(herdrState, JSON.stringify({ mode: 'ok', current: 'wV:p1', panes: [{ pane_id: 'wV:p1', workspace_id: 'wV', label }], next: 2, calls: [] }));
+  return spawnSync(process.execPath, [HOOK, tool, 'session'], {
+    input: '{}', encoding: 'utf8', timeout: 10000,
+    env: { ...process.env, HERDR_ENV: '1', HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, PR_HANDOFF_STATE_DIR: dir, ...env },
+  }).stdout;
+}
+
+test('the session hook gives the coder the rule, in the format of each tool', t => {
+  const claude = JSON.parse(runSession(t, 'claude', 'coder'));
+  assert.equal(claude.hookSpecificOutput.hookEventName, 'SessionStart');
+  assert.equal(claude.hookSpecificOutput.additionalContext, CODER_RULE);
+  assert.equal(runSession(t, 'kiro', null), `${CODER_RULE}\n`);
+  // Never in the reviewer pane, and never outside Herdr.
+  assert.equal(runSession(t, 'claude', 'reviewer'), '');
+  assert.equal(runSession(t, 'claude', 'coder', { HERDR_ENV: '' }), '');
+});
+
+test('sessionOutput and CODER_RULE stay one line each', () => {
+  assert.doesNotMatch(CODER_RULE, /\n/);
+  assert.match(CODER_RULE, /herdr-review/);
+  assert.equal(JSON.parse(sessionOutput('codex')).hookSpecificOutput.additionalContext, CODER_RULE);
+});
+
+test('findBuilderPane prefers the agent session, then the caller, then the coder label', () => {
+  const coder = { pane_id: 'w1:p1', workspace_id: 'w1', label: 'coder', agent: 'claude', agent_session: { value: 's1' } };
+  const other = { pane_id: 'w1:p3', workspace_id: 'w1', agent: 'kiro' };
+  const panes = [coder, other];
+  assert.equal(findBuilderPane(panes, { current: other, sessionId: 's1', workspace: 'w1' }), coder);
+  assert.equal(findBuilderPane(panes, { current: other, sessionId: 'none', workspace: 'w1' }), other);
+  assert.equal(findBuilderPane(panes, { current: null, sessionId: undefined, workspace: 'w1' }), coder);
+  assert.equal(findBuilderPane(panes, { current: null, sessionId: undefined, workspace: 'w2' }), null);
+});
+
+test('findReviewerPane finds the reviewer in the coder workspace, same tab first', () => {
+  const coder = { pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', label: 'coder' };
+  const far = { pane_id: 'w1:p5', workspace_id: 'w1', tab_id: 'w1:t2', label: 'reviewer' };
+  const near = { pane_id: 'w1:p2', workspace_id: 'w1', tab_id: 'w1:t1', label: 'codex review' };
+  const elsewhere = { pane_id: 'w2:p2', workspace_id: 'w2', tab_id: 'w2:t1', label: 'reviewer' };
+  assert.equal(findReviewerPane([coder, far, near, elsewhere], coder), near);
+  assert.equal(findReviewerPane([coder, far], coder), far);
+  assert.equal(findReviewerPane([coder, elsewhere], coder), null);
+});
+
+test('isReviewRequest matches herdr-review where a command starts', () => {
+  assert.equal(isReviewRequest({ tool_name: 'Bash', tool_input: { command: 'herdr-review' } }), true);
+  assert.equal(isReviewRequest({ tool_name: 'shell', tool_input: { command: 'cd app && herdr-review' } }), true);
+  assert.equal(isReviewRequest({ tool_name: 'Shell', tool_input: { command: 'echo "run herdr-review later"' } }), false);
+  assert.equal(isReviewRequest({ tool_name: 'Write', tool_input: { command: 'herdr-review' } }), false);
+  assert.equal(commandDir('cd app && herdr-review', '/repo', /(?:^|[;&|(]|\n)\s*herdr-review\b/), '/repo/app');
+});
+
+test('Kiro and Cursor events count: tool names and output fields', () => {
+  assert.equal(isPrCreate({ tool_name: 'shell', tool_input: { command: 'gh pr create --fill' } }), true);
+  assert.equal(createResult({ tool_output: '{"output":"https://github.com/o/r/pull/5\\n","exitCode":0}' }).url, 'https://github.com/o/r/pull/5');
+  assert.equal(createResult({ tool_response: { items: [{ Json: { stdout: 'https://github.com/o/r/pull/6\n' } }] } }).url, 'https://github.com/o/r/pull/6');
+  // Cursor sends an empty cwd.
+  assert.equal(eventDir({ cwd: '', workspace_roots: ['/ws'] }), '/ws');
+  assert.equal(eventDir({ cwd: '', tool_input: { cwd: '/sub' }, workspace_roots: ['/ws'] }), '/sub');
+  assert.equal(eventDir({ cwd: '/x' }), '/x');
+});
+
+test('the local review prompts name the repository, the base and the findings file', () => {
+  const local = { root: '/repo', base: 'abc123', file: '/tmp/herdr-review/1-x.md' };
+  const review = localReviewPrompt(local);
+  assert.match(review, /git -C \/repo diff abc123/);
+  assert.match(review, /Do not edit/);
+  assert.match(review, /The only file you write is \/tmp\/herdr-review\/1-x\.md/);
+  assert.doesNotMatch(review, /\n/);
+  const fix = localFixPrompt(local, 'codex');
+  assert.match(fix, /^codex reviewed your local changes in \/repo/);
+  assert.doesNotMatch(fix, /\n/);
 });
 
 const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
@@ -224,7 +390,7 @@ test('sameBranch checks the PR is on the branch the command made it for', () => 
   assert.equal(sameBranch(null, 'feat/x'), true);
 });
 
-test('repoOf gives owner/repo, so each repository gets its own reviewer', () => {
+test('repoOf gives owner/repo', () => {
   assert.equal(repoOf('https://github.com/octo/demo/pull/14'), 'octo/demo');
   assert.notEqual(repoOf('https://github.com/o/a/pull/1'), repoOf('https://github.com/o/b/pull/1'));
 });
@@ -236,39 +402,6 @@ test('headBranch reads --head and -H', () => {
   assert.equal(headBranch('gh pr create -H "feat/y" --fill'), 'feat/y');
 });
 
-test('reviewerTool picks the other tool unless PR_REVIEWER chooses', () => {
-  assert.equal(reviewerTool('claude'), 'codex');
-  assert.equal(reviewerTool('codex'), 'claude');
-  assert.equal(reviewerTool('claude', { PR_REVIEWER: 'claude' }), 'claude');
-  assert.equal(reviewerTool('codex', { PR_REVIEWER: 'nonsense' }), 'claude');
-});
-
-test('agentName is a valid, unique Herdr name', () => {
-  const name = agentName('codex', 'wW:p3');
-  assert.equal(name, 'review-codex-ww-p3');
-  assert.match(name, /^[a-z][a-z0-9_-]{0,31}$/);
-  assert.notEqual(agentName('codex', 'wW:p3'), agentName('codex', 'wW:p4'));
-  assert.ok(agentName('claude', 'w123456789:p123456789').length <= 32);
-});
-
-test('splitDirection splits wide panes right and tall panes down', () => {
-  assert.equal(splitDirection({ width: 123, height: 33 }), 'right');
-  assert.equal(splitDirection({ width: 60, height: 40 }), 'down');
-  assert.equal(splitDirection(undefined), 'down');
-});
-
-test('ownReviewerPane reuses only a pane with the hook label, in the same workspace', () => {
-  const pane = (over) => ({ pane_id: 'wV:p2', workspace_id: 'wV', label: 'codex review', agent: 'codex', ...over });
-  assert.equal(ownReviewerPane(pane(), 'wV', 'codex'), 'reuse');
-  assert.equal(ownReviewerPane(pane({ agent: null }), 'wV', 'codex'), 'restart');
-  // The user's own Codex pane: same ID after a restart, but not our label.
-  assert.equal(ownReviewerPane(pane({ label: null }), 'wV', 'codex'), null);
-  assert.equal(ownReviewerPane(pane({ label: 'v3-codex' }), 'wV', 'codex'), null);
-  assert.equal(ownReviewerPane(pane({ agent: 'claude' }), 'wV', 'codex'), null);
-  assert.equal(ownReviewerPane(pane({ workspace_id: 'wW' }), 'wV', 'codex'), null);
-  assert.equal(ownReviewerPane(null, 'wV', 'codex'), null);
-});
-
 test('reviewPrompt names the PR and forbids edits', () => {
   const text = reviewPrompt({ url: 'https://github.com/o/r/pull/7', number: 7 });
   assert.match(text, /pull\/7/);
@@ -278,24 +411,13 @@ test('reviewPrompt names the PR and forbids edits', () => {
   assert.doesNotMatch(text, /\n/);
 });
 
-test('fixPrompt asks the builder to fix, push and reply with each finding', () => {
+test('fixPrompt asks the coder to fix, push and reply with each finding', () => {
   const text = fixPrompt({ url: 'https://github.com/o/r/pull/7', number: 7 }, 'https://github.com/o/r/pull/7#pullrequestreview-1', 'codex');
   assert.match(text, /^codex reviewed your pull request https:\/\/github.com\/o\/r\/pull\/7/);
   assert.match(text, /pullrequestreview-1/);
   assert.match(text, /gh pr comment https:\/\/github.com\/o\/r\/pull\/7 --body-file/);
   assert.match(text, /not fixed" with the reason/);
   assert.doesNotMatch(text, /\n/);
-});
-
-test('isReviewerPane stops a reviewer pane from starting another review', () => {
-  const saved = { '/s.sock|wV|o/r|codex': 'wV:p2', '/other.sock|wV|o/r|codex': 'wV:p5' };
-  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p2', label: 'codex review' }), true);
-  // A builder pane, and a reviewer pane of another server, are not reviewers here.
-  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p1', label: 'claude build' }), false);
-  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p5', label: 'codex review' }), false);
-  // After a restart the ID may belong to a user's pane: no hook label, so not a reviewer.
-  assert.equal(isReviewerPane(saved, '/s.sock', { pane_id: 'wV:p2', label: 'my notes' }), false);
-  assert.equal(isReviewerPane(saved, '/s.sock', null), false);
 });
 
 test('recentStarts keeps only the last hour', () => {
