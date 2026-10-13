@@ -15,7 +15,8 @@
 #        Cursor       nothing: Cursor runs Claude Code's hooks
 #        Codex        ~/.codex/hooks.json       PostToolUse (Bash), and the coder rule as
 #                     developer_instructions in ~/.codex/config.toml
-#        Kiro         a "herdr-coder" agent (a copy of kiro_default plus the hooks), set as
+#        Kiro V3      ~/.kiro/hooks/herdr-pair.json   PostToolUse (execute_bash) + SessionStart
+#        Kiro V2      a "herdr-coder" agent (a copy of kiro_default plus the hooks), set as
 #                     the default agent
 # Each file is backed up once, to <file>.bak-herdr-pair, before the first change.
 # ================================================================
@@ -117,7 +118,26 @@ else:
 open(path, "w").write(text)
 PYEOF
 
-# Kiro 2.x reads hooks only from an agent config, so make a copy of the built-in default agent.
+# Kiro V3 (kiro-cli --v3) reads global hooks from ~/.kiro/hooks/. Its shell tool is execute_bash,
+# and SessionStart output reaches the agent. This file belongs to the installer: a run rewrites it.
+if command -v kiro-cli >/dev/null; then
+  mkdir -p "$HOME/.kiro/hooks"
+  FILE="$HOME/.kiro/hooks/herdr-pair.json" POST="$NODE $HOOK kiro" SESSION="$NODE $HOOK kiro session" python3 - <<'PYEOF'
+import os, json
+hook = lambda name, trigger, command, **extra: {"name": name, "trigger": trigger, **extra,
+    "action": {"type": "command", "command": command}, "timeout": 10, "enabled": True}
+doc = {"version": "v1", "hooks": [
+    hook("herdr-review-handoff", "PostToolUse", os.environ["POST"], matcher="execute_bash"),
+    hook("herdr-coder-rule", "SessionStart", os.environ["SESSION"]),
+]}
+with open(os.environ["FILE"], "w") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+PYEOF
+  log "Kiro V3: hooks in ~/.kiro/hooks/herdr-pair.json"
+fi
+
+# Kiro V2 (the default engine) reads hooks only from an agent config, so make a copy of the built-in default agent.
 if command -v kiro-cli >/dev/null; then
   KIRO_AGENT="$HOME/.kiro/agents/herdr-coder.json"
   if [[ ! -f "$KIRO_AGENT" ]]; then

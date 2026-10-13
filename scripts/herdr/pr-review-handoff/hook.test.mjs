@@ -382,6 +382,11 @@ test('isReviewRequest matches herdr-review where a command starts', () => {
 
 test('Kiro and Cursor events count: tool names and output fields', () => {
   assert.equal(isPrCreate({ tool_name: 'shell', tool_input: { command: 'gh pr create --fill' } }), true);
+  // Kiro V3, as captured from kiro-cli --v3: execute_bash, and the output as one string.
+  const v3 = { tool_name: 'execute_bash', tool_input: { command: 'gh pr create --fill', cwd: null }, tool_response: 'Output:\nhttps://github.com/o/r/pull/7\n\n\nExit Code: 0' };
+  assert.equal(isPrCreate(v3), true);
+  assert.equal(createResult(v3).url, 'https://github.com/o/r/pull/7');
+  assert.equal(isReviewRequest({ ...v3, tool_input: { command: 'herdr-review' } }), true);
   assert.equal(createResult({ tool_output: '{"output":"https://github.com/o/r/pull/5\\n","exitCode":0}' }).url, 'https://github.com/o/r/pull/5');
   assert.equal(createResult({ tool_response: { items: [{ Json: { stdout: 'https://github.com/o/r/pull/6\n' } }] } }).url, 'https://github.com/o/r/pull/6');
   // Cursor sends an empty cwd.

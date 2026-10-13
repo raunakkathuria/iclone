@@ -47,7 +47,8 @@ you change anything in this folder. It is safe to run again, and it backs up eac
 | Claude Code | `PostToolUse` and `SessionStart` hooks in `~/.claude/settings.json`. |
 | Cursor | Nothing: Cursor runs Claude Code's hooks. |
 | Codex | A `PostToolUse` hook in `~/.codex/hooks.json`, and the coder rule as `developer_instructions` in `~/.codex/config.toml`. |
-| Kiro | A `herdr-coder` agent: a copy of `kiro_default` plus the hooks, set as the default agent. |
+| Kiro V3 (`kiro-cli --v3`) | Global hooks in `~/.kiro/hooks/herdr-pair.json`. |
+| Kiro V2 (the default) | A `herdr-coder` agent: a copy of `kiro_default` plus the hooks, set as the default agent. |
 
 The hooks run from `~/.agents/hooks/pr-review-handoff`, a symlink to
 `~/.agents/herdr/pr-review-handoff`. `herdr-review` is a symlink in `~/.local/bin`.
@@ -88,6 +89,7 @@ An empty reviewer pane gets `reviewer`, unless the coder already runs that tool;
 herdr plugin unlink raunakkathuria.pair
 rm -r ~/.agents/herdr ~/.agents/hooks/pr-review-handoff ~/.local/bin/herdr-review
 kiro-cli agent set-default kiro_default
+rm ~/.kiro/hooks/herdr-pair.json
 ```
 
 Then delete the entries that mention `pr-review-handoff/hook.mjs` from `~/.claude/settings.json`
