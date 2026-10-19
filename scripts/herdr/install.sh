@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # ================================================================
-# install.sh: set up the coder + reviewer workflow for Herdr
+# install.sh: set up the minions (coder, reviewer, and the minion team) for Herdr
 # ================================================================
 # Usage:  ./scripts/herdr/install.sh   Safe to run again: it updates the copy and its own entries.
 #
 # What it does:
 #   1. Copies this folder to ~/.agents/herdr, so switching branches in the repository never
 #      changes the live setup. Run it again after you change anything here.
-#   2. Links the Herdr plugin in ~/.agents/herdr: every workspace gets a coder and a reviewer pane.
+#   2. Links the Herdr plugin in ~/.agents/herdr: every workspace gets a builder and a reviewer minion.
 #   3. Points ~/.agents/hooks/pr-review-handoff at ~/.agents/herdr/pr-review-handoff (a symlink),
-#      and ~/.local/bin/herdr-review at ~/.agents/herdr/bin/herdr-review.
+#      ~/.local/bin/herdr-review at ~/.agents/herdr/bin/herdr-review, and ~/.local/bin/team and
+#      team-up at the minion team commands in ~/.agents/herdr/team.
 #   4. Registers the hook in each coding tool:
 #        Claude Code  ~/.claude/settings.json   PostToolUse (Bash) + SessionStart
 #        Cursor       nothing: Cursor runs Claude Code's hooks
@@ -60,7 +61,9 @@ if [[ -d "$HOOK_LINK" && ! -L "$HOOK_LINK" ]]; then
 fi
 ln -sfn "$REPO/pr-review-handoff" "$HOOK_LINK"
 ln -sf "$REPO/bin/herdr-review" "$HOME/.local/bin/herdr-review"
-log "Linked $HOOK_LINK and ~/.local/bin/herdr-review"
+ln -sf "$REPO/team/team.mjs" "$HOME/.local/bin/team"
+ln -sf "$REPO/team/team-up.mjs" "$HOME/.local/bin/team-up"
+log "Linked $HOOK_LINK, and herdr-review, team and team-up in ~/.local/bin"
 
 # --- 4. Hooks in each tool ---
 # Adds an entry only when no entry runs pr-review-handoff/hook.mjs yet, so an entry that a tool

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // A fake `herdr` CLI for the tests. It keeps its panes, its mode and every call in the JSON file
-// named by FAKE_HERDR_STATE: { mode, current, panes, next, calls }.
+// named by FAKE_HERDR_STATE: { mode, current, panes, next, calls, workspaces? }. A workspace
+// missing from workspaces is labelled with its ID.
 const fs = require('node:fs');
 
 const file = process.env.FAKE_HERDR_STATE;
@@ -16,6 +17,25 @@ const { mode } = st;
 const [group, command] = args;
 
 if (group === 'notification') out({});
+if (group === 'workspace') {
+  st.workspaces ??= [];
+  const ws = (id) => st.workspaces.find((w) => w.workspace_id === id);
+  if (command === 'get') out({ workspace: ws(args[2]) ?? { workspace_id: args[2], label: args[2] } });
+  if (command === 'list') out({ workspaces: st.workspaces });
+  if (command === 'create') {
+    const id = `w${st.next++}`;
+    const root = { pane_id: `${id}:p${st.next++}`, workspace_id: id, tab_id: `${id}:t1`, cwd: opt('--cwd') };
+    st.workspaces.push({ workspace_id: id, label: opt('--label') });
+    st.panes.push(root);
+    out({ workspace: { workspace_id: id }, root_pane: { pane_id: root.pane_id } });
+  }
+  if (command === 'close') {
+    if (!ws(args[2])) fail('workspace_not_found');
+    st.workspaces = st.workspaces.filter((w) => w.workspace_id !== args[2]);
+    st.panes = st.panes.filter((p) => p.workspace_id !== args[2]);
+    out({});
+  }
+}
 if (group === 'pane') {
   if (command === 'current') {
     if (mode === 'missing') fail('pane_not_found');
@@ -40,7 +60,7 @@ if (group === 'pane') {
 if (group === 'agent') {
   if (command === 'start') { pane(opt('--pane')).agent = opt('--kind'); out({ agent: { pane_id: opt('--pane') } }); }
   if (command === 'get') {
-    const reviewer = pane(args[2])?.label === 'reviewer';
+    const reviewer = ['reviewer', 'reviewer-minion'].includes(pane(args[2])?.label);
     if (reviewer && (mode === 'release-false' || mode === 'release-throws')) {
       const state = process.env.PR_HANDOFF_STATE_DIR;
       if (mode === 'release-false') {

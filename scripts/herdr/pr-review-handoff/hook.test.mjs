@@ -16,10 +16,10 @@ const HOOK = fileURLToPath(new URL('./hook.mjs', import.meta.url));
 const FAKE_HERDR = fileURLToPath(new URL('../test/fake-herdr.cjs', import.meta.url));
 const URL_ = 'https://github.com/example/repro/pull/1';
 
-// A coder pane running codex and a reviewer pane running claude, in workspace wV.
+// A builder pane running codex and a reviewer pane running claude, in workspace wV.
 const PANES = () => [
-  { pane_id: 'wV:p1', workspace_id: 'wV', tab_id: 'wV:t1', label: 'coder', agent: 'codex', agent_session: { kind: 'id', value: 'builder-session' }, cwd: '/repo' },
-  { pane_id: 'wV:p2', workspace_id: 'wV', tab_id: 'wV:t1', label: 'reviewer', agent: 'claude', cwd: '/repo' },
+  { pane_id: 'wV:p1', workspace_id: 'wV', tab_id: 'wV:t1', label: 'builder-minion', agent: 'codex', agent_session: { kind: 'id', value: 'builder-session' }, cwd: '/repo' },
+  { pane_id: 'wV:p2', workspace_id: 'wV', tab_id: 'wV:t1', label: 'reviewer-minion', agent: 'claude', cwd: '/repo' },
 ];
 
 // Runs the worker against a fake herdr and a fake gh. Returns the log, and the herdr calls.
@@ -99,10 +99,20 @@ test('a stale caller pane falls back to the pane with the same agent session', t
   assert.match(log, /review done:/);
 });
 
-test('without a session match, the pane labelled coder is the coder', t => {
+test('without a session match, the builder pane is the coder', t => {
   const fixture = workerFixture(t);
   const log = fixture.run('missing', { event: { session_id: undefined } });
   assert.match(log, /built by codex in wV:p1/);
+});
+
+test('the old coder and reviewer labels still work', t => {
+  const fixture = workerFixture(t);
+  const panes = PANES();
+  panes[0].label = 'coder';
+  panes[1].label = 'reviewer';
+  const log = fixture.run('ok', { panes });
+  assert.match(log, /review by claude in wV:p2/);
+  assert.match(log, /review done:/);
 });
 
 test('a moved coder uses the pane and workspace resolved by Herdr', t => {
@@ -147,7 +157,7 @@ test('a workspace without a reviewer pane gets one, with the other tool', t => {
   assert.match(log, /review by claude in wV:p3/);
   const split = fixture.calls().find((a) => a[0] === 'pane' && a[1] === 'split');
   assert.deepEqual(split.slice(split.indexOf('--pane'), split.indexOf('--pane') + 2), ['--pane', 'wV:p1']);
-  assert.equal(fixture.panes().find((p) => p.pane_id === 'wV:p3').label, 'reviewer');
+  assert.equal(fixture.panes().find((p) => p.pane_id === 'wV:p3').label, 'reviewer-minion');
   // A new reviewer has an empty context already.
   assert.ok(!fixture.prompts('wV:p3').includes('/clear'));
 });
@@ -337,13 +347,15 @@ function runSession(t, tool, label, env = {}) {
 }
 
 test('the session hook gives the coder the rule, in the format of each tool', t => {
-  const claude = JSON.parse(runSession(t, 'claude', 'coder'));
+  const claude = JSON.parse(runSession(t, 'claude', 'builder-minion'));
   assert.equal(claude.hookSpecificOutput.hookEventName, 'SessionStart');
   assert.equal(claude.hookSpecificOutput.additionalContext, CODER_RULE);
   assert.equal(runSession(t, 'kiro', null), `${CODER_RULE}\n`);
+  assert.ok(runSession(t, 'claude', 'coder'));
   // Never in the reviewer pane, and never outside Herdr.
+  assert.equal(runSession(t, 'claude', 'reviewer-minion'), '');
   assert.equal(runSession(t, 'claude', 'reviewer'), '');
-  assert.equal(runSession(t, 'claude', 'coder', { HERDR_ENV: '' }), '');
+  assert.equal(runSession(t, 'claude', 'builder-minion', { HERDR_ENV: '' }), '');
 });
 
 test('sessionOutput and CODER_RULE stay one line each', () => {

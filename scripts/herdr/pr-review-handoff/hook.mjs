@@ -2,8 +2,9 @@
 // pr-review-handoff: the coder's finished work goes to the reviewer pane, and the findings come
 // back to the coder. It runs inside Herdr, with any coding tool Herdr detects.
 //
-// Each workspace has a pane labelled "coder" and one labelled "reviewer" (the Herdr plugin in
-// this repository makes them). The tool in each pane is whatever runs there now.
+// Each workspace has a pane labelled "builder-minion" (the coder) and one labelled
+// "reviewer-minion" (the Herdr plugin in this repository makes them). The tool in each pane is
+// whatever runs there now.
 //
 // Usage (the tool sends its hook event as JSON on stdin):
 //   node hook.mjs claude|codex|kiro          PostToolUse hook after a shell command
@@ -26,8 +27,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  CLEAR_COMMAND, STATE_DIR, ensureLayout, herdr, loadConfig, log, notify, pickReviewer, roleOf, sleep,
-  startAgent, withLock,
+  CLEAR_COMMAND, STATE_DIR, ensureLayout, herdr, loadConfig, log, notify, roleOf, sendPrompt, sleep, waitReady,
+  withLock,
 } from '../lib/herdr.mjs';
 
 // Shell tool names: Claude Code and Codex "Bash", Cursor "Shell", Kiro V2 "shell", Kiro V3 "execute_bash".
@@ -35,7 +36,6 @@ const SHELL_TOOLS = new Set(['Bash', 'Shell', 'shell', 'execute_bash']);
 // Only where a command starts, so "gh pr create" inside a quote or a comment does not count.
 const GH_PR_CREATE = /(?:^|[;&|(]|\n)\s*gh\s+pr\s+create\b/;
 const HERDR_REVIEW = /(?:^|[;&|(]|\n)\s*herdr-review\b/;
-const READY = new Set(['idle', 'done']);
 // Every coding tool may write here, even in a sandbox. PR_HANDOFF_FINDINGS_DIR is for tests.
 const FINDINGS_DIR = process.env.PR_HANDOFF_FINDINGS_DIR || '/tmp/herdr-review';
 // A PR created longer ago than this was not made by the command, which may have failed.
@@ -49,7 +49,7 @@ const LOST_PROMPT_MS = Number(process.env.PR_HANDOFF_LOST_PROMPT_MS) || 20_000;
 
 // What the coder is told at the start of each session, so that it asks for a review when done.
 export const CODER_RULE = [
-  'You work in a Herdr workspace as the coder. A reviewer agent runs in the pane labelled "reviewer".',
+  'You work in a Herdr workspace as the coder, in the pane labelled "builder-minion". A reviewer agent runs in the pane labelled "reviewer-minion".',
   'When you finish a change and do not open a pull request, run `herdr-review` from the repository folder as your last step, then stop.',
   'It sends your local changes to the reviewer, and the findings come back to you as a new prompt.',
   'A pull request you open with `gh pr create` goes to the reviewer on its own, so do not run `herdr-review` for it.',
@@ -186,11 +186,11 @@ export function headBranch(command) {
 }
 
 // The pane that ran the command. The agent's session ID is the surest match. Then the pane
-// Herdr resolves for the caller, then the pane labelled "coder" in the caller's workspace: the
-// caller's pane ID can be stale, for example after a server restart.
+// Herdr resolves for the caller, then the builder pane in the caller's workspace: the caller's
+// pane ID can be stale, for example after a server restart.
 export function findBuilderPane(panes, { current, sessionId, workspace }) {
   const bySession = sessionId && panes.find((p) => p.agent_session?.value === sessionId);
-  return bySession || current || panes.find((p) => p.workspace_id === workspace && roleOf(p.label) === 'coder') || null;
+  return bySession || current || panes.find((p) => p.workspace_id === workspace && roleOf(p.label) === 'builder') || null;
 }
 
 // The reviewer pane in the coder's workspace, the one in the same tab first.
@@ -217,6 +217,7 @@ function reviewerRules(root) {
     'You are an independent reviewer: you did not write this change, so judge it only by the code and the repository rules.',
     'You are not the coder, so do not run herdr-review.',
     `Work in ${root}: run every command there, and first read the AGENTS.md or CLAUDE.md there. If it defines a code-verifier or reviewer role, act as that role.`,
+    `If ${root}/.team/LESSONS.md exists, check the change against each lesson in it, and name the lesson (for example L-2) in each finding it covers.`,
   ];
 }
 const FINDINGS = 'Write only actionable findings, ranked P0 (must fix before merge) to P3 (nice to have), each with file:line and a one-line fix.';
@@ -393,44 +394,6 @@ export async function releaseReviewSlot(slotKey, key, token) {
   });
 }
 
-// Waits until the agent is ready for input. Tells the human once if it is waiting for them.
-// With checks = 2 the agent must be ready twice in a row, 3 seconds apart: between two of its
-// questions, an agent such as Kiro looks ready for a moment.
-async function waitReady(pane, who, timeoutMs, checks = 1) {
-  const end = Date.now() + timeoutMs;
-  let told = false;
-  let ready = 0;
-  while (Date.now() < end) {
-    const status = herdr('agent', 'get', pane).agent.agent_status;
-    ready = READY.has(status) ? ready + 1 : 0;
-    if (ready >= checks) return true;
-    if (status === 'blocked' && !told) {
-      notify(`${who} needs you`, `Answer the question in pane ${pane}. The review loop continues after that.`);
-      told = true;
-    }
-    await sleep(3000);
-  }
-  return false;
-}
-
-// Sends the prompt and checks that the agent starts working on it. An agent that has only just
-// started can drop input, so a prompt that never starts any work is sent again.
-async function sendPrompt(pane, text) {
-  for (let i = 0; i < 3; i++) {
-    try {
-      // --wait returns when the agent is ready again or waiting for the human; waitReady handles both.
-      herdr('agent', 'prompt', pane, text, '--wait', '--timeout', '30000');
-      return true;
-    } catch (e) {
-      if (e.code === 'timeout') return true; // it is working: the turn is longer than 30 seconds
-      if (e.code !== 'agent_prompt_stalled') throw e;
-      log(`prompt to ${pane} stalled; trying again`);
-      await sleep(5000);
-    }
-  }
-  return false;
-}
-
 // Finds the coder pane (see findBuilderPane). Throws when there is none.
 function resolveBuilder(event) {
   let current = null;
@@ -443,25 +406,20 @@ function resolveBuilder(event) {
   return pane;
 }
 
-// The reviewer pane in the coder's workspace, with a tool running. Adds the pane, or starts a
-// tool in it, when that is missing.
-async function getReviewer(builder, builderTool) {
+// The reviewer pane in the coder's workspace, with a tool running. The layout adds the pane, or
+// starts a tool in it, when that is missing; in a team workspace the tool gets its role.
+async function getReviewer(builder) {
   const find = () => findReviewerPane(herdr('pane', 'list', '--workspace', builder.workspace_id).panes, builder);
   let pane = find();
   let fresh = false;
   // Another run (the plugin) may hold the layout lock; then wait for it to finish.
-  for (let i = 0; i < 12 && !pane; i++) {
+  for (let i = 0; i < 12 && !pane?.agent; i++) {
     if (!(await ensureLayout(builder.workspace_id, loadConfig(), builder.pane_id))) await sleep(5000);
     pane = find();
     fresh = true;
   }
   if (!pane) throw new Error(`No reviewer pane in workspace ${builder.workspace_id}.`);
-  if (!pane.agent) {
-    await startAgent(pane.pane_id, 'reviewer', pickReviewer(builderTool, loadConfig(), process.env));
-    pane = find();
-    fresh = true;
-  }
-  if (!pane?.agent) throw new Error(`No tool runs in the reviewer pane ${pane?.pane_id}. Start one there.`);
+  if (!pane.agent) throw new Error(`No tool runs in the reviewer pane ${pane.pane_id}. Start one there.`);
   return { pane: pane.pane_id, tool: pane.agent, fresh };
 }
 
@@ -476,7 +434,7 @@ async function runReview(job) {
   try {
     // One review at a time per workspace: there is one reviewer pane.
     result = await withLock(lockKey, async () => {
-      reviewer = await getReviewer(job.builder, job.builderTool);
+      reviewer = await getReviewer(job.builder);
       const who = `${reviewer.tool} reviewer`;
       log(`${job.key}: review by ${reviewer.tool} in ${reviewer.pane}`);
       if (reviewer.tool === job.builderTool) {
@@ -561,10 +519,12 @@ async function prepare(tool, event, key, title) {
   const builderTool = builder.agent ?? tool;
   process.env.HERDR_PANE_ID = builder.pane_id;
   process.env.HERDR_WORKSPACE_ID = builder.workspace_id;
-  if (roleOf(builder.label) === 'reviewer') {
-    // A PR from the reviewer is unusual, so say so. A herdr-review run there is only noise.
-    if (!key.startsWith('local:')) notify('PR from the reviewer pane', `Pane ${builder.pane_id} is the reviewer, so its PR gets no automatic review.`);
-    log(`skip ${key}: the request came from reviewer pane ${builder.pane_id}`);
+  // Only the builder's work gets a review. A pane with no role counts as the builder.
+  const role = roleOf(builder.label);
+  if (role && role !== 'builder') {
+    // A PR from another minion is unusual, so say so. A herdr-review run there is only noise.
+    if (!key.startsWith('local:')) notify(`PR from the ${role} pane`, `Pane ${builder.pane_id} is the ${role}, so its PR gets no automatic review.`);
+    log(`skip ${key}: the request came from ${role} pane ${builder.pane_id}`);
     return null;
   }
   const slotKey = `${process.env.HERDR_SOCKET_PATH}|${builder.pane_id}`;
@@ -648,12 +608,14 @@ async function hook(tool) {
   log(`hook: ${tool} ran ${kind === 'pr' ? 'gh pr create' : 'herdr-review'}; pane ${process.env.HERDR_PANE_ID}, socket ${process.env.HERDR_SOCKET_PATH}; worker ${child.pid}`);
 }
 
-// The session part: gives the coder the rule, inside Herdr only, and never in the reviewer pane.
+// The session part: gives the coder the rule, inside Herdr only, and only in the builder pane or
+// a pane with no role.
 async function session(tool) {
   await readStdin();
   if (process.env.HERDR_ENV !== '1') return;
   try {
-    if (roleOf(herdr('pane', 'current', '--current').pane?.label) === 'reviewer') return;
+    const role = roleOf(herdr('pane', 'current', '--current').pane?.label);
+    if (role && role !== 'builder') return;
   } catch { /* unknown pane: give the rule */ }
   process.stdout.write(sessionOutput(tool));
 }

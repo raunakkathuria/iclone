@@ -1,8 +1,8 @@
 id = "raunakkathuria.pair"
-name = "Coder and reviewer"
+name = "Minions"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
-description = "Every workspace gets a coder pane and a reviewer pane, each with a coding agent"
+description = "Every workspace gets a builder-minion and a reviewer-minion pane, each with a coding agent"
 platforms = ["macos", "linux"]
 
 # New workspaces, including the ones "herdr worktree create" makes.
