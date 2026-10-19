@@ -27,8 +27,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  CLEAR_COMMAND, STATE_DIR, agentReady, ensureLayout, herdr, isTeam, loadConfig, log, notify, roleOf, sendPrompt,
-  sleep, waitReady, withLock,
+  CLEAR_COMMAND, SEATS, STATE_DIR, agentReady, ensureLayout, herdr, isTeam, loadConfig, log, notify, roleOf,
+  sendPrompt, sleep, waitReady, withLock,
 } from '../lib/herdr.mjs';
 
 // Shell tool names: Claude Code and Codex "Bash", Cursor "Shell", Kiro V2 "shell", Kiro V3 "execute_bash".
@@ -554,8 +554,9 @@ async function prepare(tool, event, key, title) {
   const builderTool = builder.agent ?? tool;
   process.env.HERDR_PANE_ID = builder.pane_id;
   process.env.HERDR_WORKSPACE_ID = builder.workspace_id;
-  // Only the builder's work gets a review. A pane with no role counts as the builder.
-  const role = roleOf(builder.label);
+  // Only the builder's work gets a review. A pane with no role counts as the builder; Gru's
+  // seats do not.
+  const role = roleOf(builder.label) ?? (SEATS.has(builder.label) ? builder.label : null);
   if (role && role !== 'builder') {
     // A PR from another minion is unusual, so say so. A herdr-review run there is only noise.
     if (!key.startsWith('local:')) notify(`PR from the ${role} pane`, `Pane ${builder.pane_id} is the ${role}, so its PR gets no automatic review.`);

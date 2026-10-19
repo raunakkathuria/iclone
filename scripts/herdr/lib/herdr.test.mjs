@@ -66,12 +66,18 @@ test('planLayout picks the builder and reviewer panes', () => {
   // A pane with an agent beats the focused shell; the old reviewer label still counts.
   assert.deepEqual(planLayout([a, b, c, r]), pair(b, r));
   assert.deepEqual(planLayout([a, c]), pair(c, null));
-  // The builder label wins, old or new, and the caller's pane wins over everything.
+  // The builder label wins, old or new, even over the pane that asked for a review: a workspace
+  // must never get a second builder. Without a label, the caller's pane wins.
   const labelled = shell('w1:p5', { label: 'builder-minion' });
   assert.equal(planLayout([b, labelled]).builder, labelled);
   assert.equal(planLayout([b, shell('w1:p6', { label: 'coder' })]).builder.pane_id, 'w1:p6');
   assert.equal(planLayout([b, labelled], 'w1:p9').builder, labelled);
-  assert.equal(planLayout([a, b, labelled], 'w1:p1').builder, a);
+  assert.equal(planLayout([a, b, labelled], 'w1:p1').builder, labelled);
+  assert.equal(planLayout([a, b], 'w1:p1').builder, a);
+  // Gru's seats never become a minion, even when they ask for a review.
+  const gru = shell('w1:p8', { label: 'gru', focused: true });
+  assert.equal(planLayout([gru, b], 'w1:p8').builder, b);
+  assert.equal(planLayout([gru, shell('w1:p9', { label: 'log' })]).builder, null);
   // The new reviewer label beats an old one.
   const minion = shell('w1:p7', { label: 'reviewer-minion' });
   assert.equal(planLayout([a, r, minion]).reviewer, minion);
@@ -195,7 +201,9 @@ test('team labels and role arguments', () => {
   // The minions share one folder: only the builder may switch branches or commit.
   const qa = roleArgs('qa', 'claude', '/x/qa.md');
   assert.deepEqual(qa.slice(0, 5), ['--append-system-prompt-file', '/x/qa.md', '--allowedTools', 'Bash(team:*)', '--disallowedTools']);
-  assert.ok(qa.includes('Bash(git checkout:*)') && qa.includes('Bash(gh pr checkout:*)'));
+  for (const command of ['git checkout', 'git push', 'git clean', 'git rm', 'git -C', 'git -c', 'gh pr checkout']) {
+    assert.ok(qa.includes(`Bash(${command}:*)`), command);
+  }
   const codex = roleArgs('reviewer', 'codex', '/x/reviewer.md');
   assert.ok(codex.includes('sandbox_workspace_write.network_access=true'));
   assert.ok(codex.includes('developer_instructions="You are reviewer-minion, one of the minions. Before every task and every review, read /x/reviewer.md and follow it."'));

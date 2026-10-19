@@ -135,6 +135,15 @@ test('a review request from the reviewer pane is skipped', t => {
   assert.equal(fixture.prompts().length, 0);
 });
 
+test('a review asked for from the gru pane is skipped', t => {
+  const fixture = workerFixture(t);
+  const panes = [...PANES(), { pane_id: 'wV:p3', workspace_id: 'wV', tab_id: 'wV:t1', label: 'gru', cwd: '/repo' }];
+  const log = fixture.run('ok', { panes, current: 'wV:p3', event: { session_id: undefined } });
+  assert.match(log, /the request came from gru pane wV:p3/);
+  assert.equal(fixture.claimed(), false);
+  assert.equal(fixture.prompts().length, 0);
+});
+
 test('herdr-review from the reviewer pane is skipped without a notice', t => {
   const fixture = workerFixture(t);
   const repo = gitRepo(fixture.dir);

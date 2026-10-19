@@ -70,9 +70,16 @@ if [[ -d "$HOOK_LINK" && ! -L "$HOOK_LINK" ]]; then
 fi
 ln -sfn "$REPO/pr-review-handoff" "$HOOK_LINK"
 ln -sf "$REPO/bin/herdr-review" "$HOME/.local/bin/herdr-review"
-ln -sf "$REPO/team/team.mjs" "$HOME/.local/bin/team"
-ln -sf "$REPO/team/team-up.mjs" "$HOME/.local/bin/team-up"
-log "Linked $HOOK_LINK, and herdr-review, team and team-up in ~/.local/bin"
+log "Linked $HOOK_LINK and ~/.local/bin/herdr-review"
+# team is a common command name, so a file that is not a link is never replaced.
+for cmd in team team-up; do
+  if [[ -e "$HOME/.local/bin/$cmd" && ! -L "$HOME/.local/bin/$cmd" ]]; then
+    warn "~/.local/bin/$cmd is another program, so it was left alone. Remove it, then run install.sh again."
+    continue
+  fi
+  ln -sf "$REPO/team/$cmd.mjs" "$HOME/.local/bin/$cmd"
+  log "Linked ~/.local/bin/$cmd"
+done
 
 # --- 4. Hooks in each tool ---
 # Adds an entry only when no entry runs pr-review-handoff/hook.mjs yet, so an entry that a tool

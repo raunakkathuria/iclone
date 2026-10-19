@@ -20,6 +20,10 @@ const MINUTE = 60_000;
 // The pane label of each role. A pair has the first two; a team has all four.
 export const MINIONS = { builder: 'builder-minion', reviewer: 'reviewer-minion', product: 'product-minion', qa: 'qa-minion' };
 
+// Panes for Gru, not for a minion: "gru" runs team watch, "log" shows the record. A seat never
+// becomes a minion, and work started there gets no review.
+export const SEATS = new Set(['gru', 'log']);
+
 // The label of a project's team workspace, and whether a workspace label is one.
 export const teamLabel = (dir) => `${basename(dir)} minions`;
 export const isTeam = (label) => /\sminions$/.test(label ?? '');
@@ -99,14 +103,15 @@ export function agentName(role, paneId) {
 }
 
 // Which pane of a workspace has which role. Pure: works on `pane list` output. The builder is
-// builderId when given (the pane that asked for a review), else the builder pane by label, else
-// a pane with an agent (the focused one first), else the focused pane, else the first. The other
-// roles come from labels only. Any of them can be null.
+// the pane labelled as the builder, else builderId when given (the pane that asked for a
+// review), else a pane with an agent (the focused one first), else the focused pane, else the
+// first. A labelled builder wins, so a workspace never gets two. The other roles come from
+// labels only. Any of them can be null.
 export function planLayout(panes, builderId = null) {
-  // The builder is a pane with the builder role or with no role.
-  const free = panes.filter((p) => [null, 'builder'].includes(roleOf(p.label)));
-  const builder = free.find((p) => p.pane_id === builderId)
-    ?? free.find((p) => roleOf(p.label) === 'builder')
+  // The builder is a pane with the builder role or with no role, and never a seat.
+  const free = panes.filter((p) => !SEATS.has(p.label) && [null, 'builder'].includes(roleOf(p.label)));
+  const builder = free.find((p) => roleOf(p.label) === 'builder')
+    ?? free.find((p) => p.pane_id === builderId)
     ?? free.find((p) => p.agent && p.focused)
     ?? free.find((p) => p.agent)
     ?? free.find((p) => p.focused)
@@ -144,8 +149,10 @@ export function rolePromptFile(role) {
 
 // The minions share one project folder, so only the builder may change it through git: a
 // checkout by another minion would swap the builder's files under it.
+// "git -C <dir>" and "git -c <key>" start with an option, so they are denied too.
 const GIT_WRITES = ['git checkout', 'git switch', 'git stash', 'git reset', 'git restore', 'git commit', 'git merge',
-  'git rebase', 'git pull', 'git cherry-pick', 'gh pr checkout'].map((c) => `Bash(${c}:*)`);
+  'git rebase', 'git pull', 'git push', 'git cherry-pick', 'git clean', 'git rm', 'git -C', 'git -c', 'gh pr checkout']
+  .map((c) => `Bash(${c}:*)`);
 // The tools that take their role when they start. Any other tool gets roleNote with each message.
 const ROLE_AT_START = new Set(['claude', 'codex']);
 
