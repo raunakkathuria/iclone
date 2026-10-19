@@ -13,6 +13,8 @@
 // 4. Opens a workspace named "<project> minions". The layout code (ensureLayout in
 //    lib/herdr.mjs, also run by the Herdr plugin) fills it with the minions, each with its role.
 // 5. Sends each new minion its first prompt: the "start" line in its file.
+// 6. Gives Gru two seats, when they are missing: a "gru" pane under the minions that runs
+//    team watch, and a "log" tab that shows every message.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -83,6 +85,32 @@ async function layout(ws, members) {
   throw new Error(`the minions in workspace ${ws} did not all start. Look at the panes for a question to answer.`);
 }
 
+// Types a command into a plain shell pane. A new shell needs a moment before it takes input.
+async function runIn(pane, command) {
+  await sleep(1500);
+  herdr('pane', 'send-text', pane, command);
+  herdr('pane', 'send-keys', pane, 'enter');
+}
+
+// Gru's seats: a small "gru" pane at the bottom of the right column, running team watch, and a
+// "log" tab with every message. Adds the ones that are missing.
+async function seats(ws, root, panes, members) {
+  const labels = herdr('pane', 'list', '--workspace', ws).panes.map((p) => p.label);
+  if (!labels.includes('gru')) {
+    // The right column: the reviewer, then every second minion after the pair.
+    const right = members.filter((_, i) => i === 1 || (i > 1 && i % 2 === 1));
+    const id = herdr('pane', 'split', '--pane', panes[right.at(-1)], '--direction', 'down', '--ratio', '0.6',
+      '--cwd', root, '--no-focus').pane.pane_id;
+    herdr('pane', 'rename', id, 'gru');
+    await runIn(id, 'team watch');
+  }
+  if (!labels.includes('log')) {
+    const id = herdr('tab', 'create', '--workspace', ws, '--cwd', root, '--label', 'log', '--no-focus').root_pane.pane_id;
+    herdr('pane', 'rename', id, 'log');
+    await runIn(id, 'tail -n 30 -F .team/LOG.md');
+  }
+}
+
 // Sends a minion its first prompt. A new tool can wait at a question first, such as "Do you trust
 // this folder?"; then Gru answers it in the pane, and this waits.
 async function kickoff(root, pane, role) {
@@ -113,6 +141,7 @@ async function main() {
   const starting = running ? added : members;
   if (starting.length) console.log(`Starting ${starting.map((m) => MINIONS[m]).join(', ')} in workspace ${ws}. This takes about a minute.`);
   const panes = await layout(ws, members);
+  await seats(ws, root, panes, members);
   for (const role of starting) await kickoff(root, panes[role], role);
   // The minions already at work started with the old team list, so they are told who joined.
   for (const role of running ? members.filter((m) => !starting.includes(m)) : []) {

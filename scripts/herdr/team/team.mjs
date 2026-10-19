@@ -7,8 +7,9 @@
 // and never waits for an answer, so two minions can never wait on each other.
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { MINIONS, findTeam, herdr, notify, roleNote, roleOf } from '../lib/herdr.mjs';
+import { MINIONS, findTeam, herdr, notify, roleNote, roleOf, sleep } from '../lib/herdr.mjs';
 import { promptFile } from '../lib/minions.mjs';
+import { boardTasks, openEscalations, render } from './watch.mjs';
 import { PROMOTED, addLesson, addPromoted, findLesson, lessonBody, oneWhy, takeWatching } from './lessons.mjs';
 
 const USAGE = `Usage:
@@ -19,10 +20,11 @@ const USAGE = `Usage:
   team learn <W-n>                                  move a Watching line up to the lessons
   team promote <L-n>                                Gru gives a lesson to every new project
   team status                                       the board, open escalations, latest decisions
+  team watch                                        Gru's view: does Gru need to act? Every 10 seconds
   team down                                         Gru closes the team workspace`;
 
 const [command, ...args] = process.argv.slice(2);
-if (!['say', 'escalate', 'decide', 'learn', 'promote', 'status', 'down'].includes(command)) {
+if (!['say', 'escalate', 'decide', 'learn', 'promote', 'status', 'watch', 'down'].includes(command)) {
   console.error(USAGE);
   process.exit(command ? 1 : 0);
 }
@@ -184,6 +186,26 @@ if (command === 'say') {
   const decisions = read('DECISIONS.md').split('\n').filter((l) => /^## D-\d+/.test(l)).slice(-5);
   console.log(`\nLatest decisions:\n${decisions.join('\n') || '(none)'}`);
   console.log(`\nTeam workspace: ${ws ? ws.workspace_id : 'not running'}`);
+} else if (command === 'watch') {
+  // Redraws until Ctrl-C. "Idle" counts from the last time Herdr showed any minion working.
+  let busyAt = Date.now();
+  for (;;) {
+    const team = findTeam(root);
+    let panes = [];
+    try { panes = team ? minionPanes(team) : []; } catch { /* Herdr is restarting */ }
+    if (panes.some((p) => !['idle', 'done'].includes(p.agent_status))) busyAt = Date.now();
+    const lines = render({
+      escalations: openEscalations(read('ESCALATIONS.md')),
+      tasks: boardTasks(read('BOARD.md')),
+      lastLog: read('LOG.md').trim().split('\n').at(-1)?.slice(11) ?? '',
+      idleMinutes: team ? Math.floor((Date.now() - busyAt) / 60_000) : null,
+      time: now().slice(11),
+      width: process.stdout.columns || 80,
+      rows: (process.stdout.rows || 24) - 1,
+    });
+    process.stdout.write(`\x1b[2J\x1b[H${lines.join('\n')}`);
+    await sleep(10_000);
+  }
 } else if (command === 'down') {
   gruOnly('close the team');
   if (!ws) fail('the team is not running.');

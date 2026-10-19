@@ -36,6 +36,12 @@ if (group === 'workspace') {
     out({});
   }
 }
+if (group === 'tab' && command === 'create') {
+  const workspace = opt('--workspace');
+  const id = `${workspace}:p${st.next++}`;
+  st.panes.push({ pane_id: id, workspace_id: workspace, tab_id: `${workspace}:t2`, cwd: opt('--cwd') });
+  out({ tab: { tab_id: `${workspace}:t2` }, root_pane: { pane_id: id } });
+}
 if (group === 'pane') {
   if (command === 'current') {
     if (mode === 'missing') fail('pane_not_found');

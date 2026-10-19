@@ -56,7 +56,12 @@ test('with a goal, team-up starts four minions in a "<project> minions" workspac
   assert.equal(code, 0, err);
   assert.deepEqual(state().workspaces.map((w) => w.label), ['my-app minions']);
   assert.deepEqual(state().panes.map((p) => [p.label, p.agent]),
-    [['builder-minion', 'claude'], ['reviewer-minion', 'codex'], ['product-minion', 'claude'], ['qa-minion', 'claude']]);
+    [['builder-minion', 'claude'], ['reviewer-minion', 'codex'], ['product-minion', 'claude'], ['qa-minion', 'claude'], ['gru', undefined], ['log', undefined]]);
+  // Gru's seats: team watch under the minions, and the whole log in its own tab.
+  const typed = state().calls.filter((a) => a[1] === 'send-text').map((a) => [a[2], a[3]]);
+  assert.deepEqual(typed, [[paneOf('gru'), 'team watch'], [paneOf('log'), 'tail -n 30 -F .team/LOG.md']]);
+  const gruSplit = state().calls.find((a) => a[1] === 'split' && a.includes('0.6'));
+  assert.equal(gruSplit[gruSplit.indexOf('--pane') + 1], paneOf('qa-minion'));
   // Each minion gets its first prompt; the goal check goes to product and reviewer.
   assert.match(prompts(paneOf('reviewer-minion'))[0], /goal check/);
   assert.match(prompts(paneOf('product-minion'))[0], /goal check/);
@@ -117,6 +122,14 @@ test('team status shows the board, open escalations and decisions', () => {
   assert.match(out, /# BOARD/);
   assert.match(out, /## E-2 .* OPEN/);
   assert.match(out, /## D-1/);
+});
+
+test('team watch shows Gru the open escalation first', () => {
+  const frame = spawnSync(process.execPath, [TEAM, 'watch'], {
+    cwd: project, encoding: 'utf8', timeout: 4000,
+    env: { ...process.env, HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, HERDR_PANE_ID: '', HERDR_WORKSPACE_ID: '' },
+  }).stdout.replace(/\x1b\[[0-9;]*[mJH]/g, '');
+  assert.match(frame, /^Gru, a decision is needed:\nE-2: next one\n/);
 });
 
 test('only Gru decides and closes the team, and record text is one line', () => {
@@ -343,7 +356,7 @@ test('team-up qa starts the pair and qa, and team-up product adds product to the
   writeFileSync(join(app, '.team', 'GOAL.md'), '# GOAL\nSmall.\n');
   assert.equal(run(TEAM_UP, [], app).code, 0);
   const ws = state().workspaces.find((w) => w.label === 'small-app minions').workspace_id;
-  const panes = () => state().panes.filter((p) => p.workspace_id === ws);
+  const panes = () => state().panes.filter((p) => p.workspace_id === ws && p.label?.endsWith('-minion'));
   const paneIn = (label) => panes().find((p) => p.label === label).pane_id;
   assert.deepEqual(panes().map((p) => p.label), ['builder-minion', 'reviewer-minion', 'qa-minion']);
   // The builder's first prompt covers a team with no product-minion, and every prompt is saved.
