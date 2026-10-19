@@ -127,19 +127,36 @@ export function rolePromptFile(role) {
   return file;
 }
 
+// The minions share one project folder, so only the builder may change it through git: a
+// checkout by another minion would swap the builder's files under it.
+const GIT_WRITES = ['git checkout', 'git switch', 'git stash', 'git reset', 'git restore', 'git commit', 'git merge',
+  'git rebase', 'git pull', 'git cherry-pick', 'gh pr checkout'].map((c) => `Bash(${c}:*)`);
+// The tools that take their role when they start. Any other tool gets roleNote with each message.
+const ROLE_AT_START = new Set(['claude', 'codex']);
+
 // The arguments that start a team minion with its role. The role stays through /clear and /new.
-// Claude reads the prompt file and may run `team` without asking. Codex gets a one-line pointer
-// to the file (Herdr refuses arguments with line breaks), and network access in its sandbox:
-// without it, `team` cannot reach the Herdr socket.
+// Claude reads the prompt file, may run `team` without asking, and, except for the builder, may
+// not change the folder through git. Codex gets a one-line pointer to the file (Herdr refuses
+// arguments with line breaks), and network access in its sandbox: without it, `team` cannot
+// reach the Herdr socket. Cursor trusts the folder at once, because Herdr sees its trust
+// question as idle and would type the first prompt into it.
 export function roleArgs(role, kind, file = rolePromptFile(role)) {
-  if (kind === 'claude') return ['--append-system-prompt-file', file, '--allowedTools', 'Bash(team:*)'];
+  if (kind === 'claude') {
+    return ['--append-system-prompt-file', file, '--allowedTools', 'Bash(team:*)',
+      ...(role === 'builder' ? [] : ['--disallowedTools', ...GIT_WRITES])];
+  }
   if (kind === 'codex') {
     const pointer = `You are ${MINIONS[role]}, one of the minions. Before every task and every review, read ${file} and follow it.`;
     return ['-c', 'sandbox_mode="workspace-write"', '-c', 'sandbox_workspace_write.network_access=true',
       '-c', `developer_instructions=${JSON.stringify(pointer)}`];
   }
-  log(`no role arguments for ${kind}; ${MINIONS[role]} starts without its role`);
-  return [];
+  return kind === 'cursor' ? ['--trust'] : [];
+}
+
+// The start of each message to a minion whose tool cannot take its role at start: a reminder of
+// the role, which also works after /clear. Empty for Claude and Codex.
+export function roleNote(role, kind, file = rolePromptFile(role)) {
+  return ROLE_AT_START.has(kind) ? '' : `(You are ${MINIONS[role]}, one of the minions: first read ${file} and follow it.) `;
 }
 
 // Starts a tool in a pane that is at a shell prompt. A new shell may still be loading, so it

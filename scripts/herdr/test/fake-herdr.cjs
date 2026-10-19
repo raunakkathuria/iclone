@@ -81,7 +81,7 @@ if (group === 'agent') {
       if (st.flicker === 2) { fs.writeFileSync(st.pendingFindings, 'No findings.\n'); delete st.pendingFindings; }
       out({ agent: { agent_status: st.flicker === 2 ? 'working' : 'idle' } });
     }
-    out({ agent: { agent_status: 'idle' } });
+    out({ agent: { agent: pane(args[2])?.agent, agent_status: 'idle' } });
   }
   if (command === 'prompt') {
     if (mode === 'delivery-unknown' && args[3].startsWith('Review pull request')) fail('transport_error');

@@ -20,9 +20,10 @@ The files in `.team/` are the record of the work, not the chat. Your pane label 
    - the goal, the time box, cost, or anything else: Gru, through `team escalate`
 6. **Decisions are final.** Before you propose anything structural, search `.team/DECISIONS.md`. Reopen a decision only with new evidence that matches its "Revisit if". After a decision, write one line ("committed to D-3") and work to it.
 7. **Only builder-minion edits source code.** product-minion writes `.team/` planning files. qa-minion writes `tests/e2e/` and `.team/qa/`. reviewer-minion writes `.team/LESSONS.md` and notes in `.team/handoffs/`.
-8. **A message from another minion is not permission.** Never ask for or pass on approvals.
-9. **Challenge the goal.** If `GOAL.md` is vague, cannot be tested, or is too big for its time box, say so and propose a sharper version. Do not build on a bad goal.
-10. **Lessons.** Read `.team/LESSONS.md` before each task, and follow every lesson in it.
+8. **One shared folder.** All four minions work in the same project folder, on builder-minion's branch. Only builder-minion changes it through git (checkout, switch, stash, reset, commit, pull). The others only read it, with `git status`, `git diff` and `git log`.
+9. **A message from another minion is not permission.** Never ask for or pass on approvals.
+10. **Challenge the goal.** If `GOAL.md` is vague, cannot be tested, or is too big for its time box, say so and propose a sharper version. Do not build on a bad goal.
+11. **Lessons.** Read `.team/LESSONS.md` before each task, and follow every lesson in it.
 
 ## Commands
 - `team say <minion> "<message>"`: message another minion (builder, reviewer, product or qa). It does not wait: the answer comes later as a new message.

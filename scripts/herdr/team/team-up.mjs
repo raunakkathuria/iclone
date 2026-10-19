@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MINIONS, ensureLayout, herdr, sendPrompt, sleep, teamLabel, waitReady } from '../lib/herdr.mjs';
+import { MINIONS, ensureLayout, herdr, roleNote, sendPrompt, sleep, teamLabel, waitReady } from '../lib/herdr.mjs';
 
 const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), 'templates');
 const KICKOFF = {
@@ -51,12 +51,11 @@ async function layout(ws) {
 
 // Sends a minion its first prompt. A new tool can wait at a question first, such as "Do you trust
 // this folder?"; then Gru answers it in the pane, and this waits.
-async function kickoff(pane, minion, text) {
-  if (herdr('agent', 'get', pane).agent.agent_status === 'blocked') {
-    console.log(`${minion} waits at a question in pane ${pane}. Answer it there.`);
-  }
+async function kickoff(pane, role, text) {
+  const { agent: kind, agent_status: status } = herdr('agent', 'get', pane).agent;
+  if (status === 'blocked') console.log(`${MINIONS[role]} waits at a question in pane ${pane}. Answer it there.`);
   try {
-    return (await waitReady(pane, minion, 30 * 60_000)) && (await sendPrompt(pane, text));
+    return (await waitReady(pane, MINIONS[role], 30 * 60_000)) && (await sendPrompt(pane, roleNote(role, kind) + text));
   } catch (e) {
     if (e.code === 'agent_blocked') return false;
     throw e;
@@ -81,7 +80,7 @@ async function main() {
   console.log(`Starting the minions in workspace ${ws}. This takes about a minute.`);
   const panes = await layout(ws);
   for (const [role, text] of Object.entries(KICKOFF)) {
-    if (!(await kickoff(panes[role], MINIONS[role], text))) console.error(`team-up: ${MINIONS[role]} did not take its first prompt. Send it yourself: ${text}`);
+    if (!(await kickoff(panes[role], role, text))) console.error(`team-up: ${MINIONS[role]} did not take its first prompt. Send it yourself: ${text}`);
   }
   herdr('workspace', 'focus', ws);
   console.log(`The minions are working. Gru's commands: team status, team decide, team down.`);

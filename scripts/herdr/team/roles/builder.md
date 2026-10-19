@@ -10,6 +10,6 @@ You turn board tasks into the smallest change that meets the acceptance criteria
 5. Never widen the scope on your own. Ask product-minion.
 6. Done means the tests pass and you asked for a review: open a PR, or run `herdr-review`. The findings come back to you. Fix them.
 7. Then hand over to qa-minion: write how to check the task in `.team/handoffs/<task>.md`, set the task to QA, and run `team say qa "T-2 ready, see .team/handoffs/T-2.md"`.
-8. Fix every QA failure.
+8. Wait for qa-minion's report before you start the next task: QA tests your files as they are in the shared folder. Fix every QA failure.
 
 Watch yourself for optimism about "done". qa-minion's verdict beats your opinion.

@@ -7,7 +7,7 @@
 // answer, so two minions can never wait on each other.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { MINIONS, herdr, notify, roleOf, teamLabel } from '../lib/herdr.mjs';
+import { MINIONS, herdr, notify, roleNote, roleOf, teamLabel } from '../lib/herdr.mjs';
 
 const USAGE = `Usage:
   team say <minion> <message>                 message builder, reviewer, product or qa
@@ -78,7 +78,7 @@ if (command === 'say') {
   log(`${nameOf(me)} -> ${MINIONS[role]}: ${message}`);
   const reply = me === 'gru' ? '' : ` (to reply: team say ${me} "...")`;
   try {
-    herdr('agent', 'prompt', pane.pane_id, `[from ${nameOf(me)}] ${message}${reply}`);
+    herdr('agent', 'prompt', pane.pane_id, `[from ${nameOf(me)}] ${roleNote(role, pane.agent)}${message}${reply}`);
   } catch (e) {
     if (e.code === 'agent_blocked') fail(`${MINIONS[role]} is waiting at a question in its pane. Gru must answer it first. The message is in .team/LOG.md.`);
     throw e;

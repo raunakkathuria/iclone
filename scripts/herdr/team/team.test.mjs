@@ -80,6 +80,10 @@ test('team say from a minion names it and says how to reply', () => {
   run(TEAM, ['say', 'builder-minion', 'T-1 fails']);
   assert.equal(prompts(paneOf('builder-minion')).at(-1), '[from qa-minion] T-1 fails (to reply: team say qa "...")');
   setState({ current: null });
+  // A minion in a tool that cannot take its role at start gets a reminder with each message.
+  setState({ panes: state().panes.map((p) => (p.label === 'reviewer-minion' ? { ...p, agent: 'cursor' } : p)) });
+  run(TEAM, ['say', 'reviewer', 'plan ready']);
+  assert.match(prompts(paneOf('reviewer-minion')).at(-1), /^\[from gru\] \(You are reviewer-minion, one of the minions: first read \S+reviewer\.md and follow it\.\) plan ready$/);
   assert.equal(run(TEAM, ['say', 'gru', 'hi']).code, 1);
   assert.equal(run(TEAM, ['say', 'qa']).code, 1);
 });

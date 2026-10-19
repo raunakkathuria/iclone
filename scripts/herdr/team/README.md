@@ -76,19 +76,29 @@ The rules are in `roles/_shared.md`, and each minion's job is in `roles/<minion>
   `/new`. Claude gets `roles/_shared.md` and its role file through `--append-system-prompt-file`.
   Codex gets a one-line `developer_instructions` that points to the same text, because Herdr
   refuses arguments with line breaks.
+- **A tool with no system prompt option, such as Cursor, gets a reminder instead.** Each message
+  from `team` and `team-up` starts with "You are reviewer-minion: first read <role file>".
+  Cursor also starts with `--trust`, because Herdr sees its trust question as idle.
 - **Claude minions may run `team` without asking** (`--allowedTools 'Bash(team:*)'`). Codex runs
   with network access in its sandbox: without it, `team` cannot reach the Herdr socket.
+- **One shared folder.** All four minions work in the project folder, on the builder's branch.
+  Only the builder changes it through git. Claude minions other than the builder cannot run
+  `git checkout`, `switch`, `stash`, `reset`, `commit` and the like (`--disallowedTools`). QA tests
+  the files as they are, and the builder waits for QA's report before its next task.
 - **`team say` finds a minion by its pane label** in the team workspace, so two projects never
   clash.
 
 ## Known limits
 
-- Only `builder-minion` should edit code, but this is a rule in the prompts. Nothing blocks the
-  other minions yet.
+- Only `builder-minion` should edit code, but this is a rule in the prompts. Only the git
+  commands are blocked, and only in Claude minions.
+- One builder works at a time. Two builders at once would each need their own git worktree (a
+  second checkout of the repository). That is not built yet.
 - A minion that waits at a question stops its part of the work until you answer it in its pane.
 - Herdr sees Codex's "Usage limit reached" question as idle, so a message to the reviewer can
   land in that question.
-- Only Claude and Codex get their role. Another tool starts without one.
+- `team-up` sends the first prompts one minion at a time. While one minion waits at a question,
+  the minions after it wait too.
 - Four minions use four times the tokens. Close the team with `team down` when you are done.
 
 ## Tests

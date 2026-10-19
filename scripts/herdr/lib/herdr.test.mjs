@@ -11,7 +11,7 @@ const STATE = mkdtempSync(join(tmpdir(), 'pair-lib-'));
 process.env.PR_HANDOFF_STATE_DIR = STATE;
 process.env.HERDR_BIN_PATH = fileURLToPath(new URL('../test/fake-herdr.cjs', import.meta.url));
 const lib = await import('./herdr.mjs');
-const { agentName, ensureLayout, isTeam, loadConfig, pickReviewer, planLayout, roleArgs, roleOf, splitDirection, teamLabel, tryLock } = lib;
+const { agentName, ensureLayout, isTeam, loadConfig, pickReviewer, planLayout, roleArgs, roleNote, roleOf, splitDirection, teamLabel, tryLock } = lib;
 const PAIR = fileURLToPath(new URL('../pair.mjs', import.meta.url));
 const CONFIG = { builder: 'claude', reviewer: 'codex' };
 
@@ -191,13 +191,24 @@ test('team labels and role arguments', () => {
   assert.equal(isTeam('my-app minions'), true);
   assert.equal(isTeam('minions'), false);
   assert.equal(isTeam('my-app'), false);
-  assert.deepEqual(roleArgs('qa', 'claude', '/x/qa.md'), ['--append-system-prompt-file', '/x/qa.md', '--allowedTools', 'Bash(team:*)']);
+  assert.deepEqual(roleArgs('builder', 'claude', '/x/builder.md'), ['--append-system-prompt-file', '/x/builder.md', '--allowedTools', 'Bash(team:*)']);
+  // The minions share one folder: only the builder may switch branches or commit.
+  const qa = roleArgs('qa', 'claude', '/x/qa.md');
+  assert.deepEqual(qa.slice(0, 5), ['--append-system-prompt-file', '/x/qa.md', '--allowedTools', 'Bash(team:*)', '--disallowedTools']);
+  assert.ok(qa.includes('Bash(git checkout:*)') && qa.includes('Bash(gh pr checkout:*)'));
   const codex = roleArgs('reviewer', 'codex', '/x/reviewer.md');
   assert.ok(codex.includes('sandbox_workspace_write.network_access=true'));
   assert.ok(codex.includes('developer_instructions="You are reviewer-minion, one of the minions. Before every task and every review, read /x/reviewer.md and follow it."'));
   // Herdr refuses arguments with line breaks.
   assert.ok(codex.every((a) => !a.includes('\n')));
   assert.deepEqual(roleArgs('qa', 'kiro', '/x/qa.md'), []);
+  assert.deepEqual(roleArgs('reviewer', 'cursor', '/x/reviewer.md'), ['--trust']);
+});
+
+test('roleNote reminds a tool that cannot take its role at start', () => {
+  assert.equal(roleNote('reviewer', 'claude', '/x/r.md'), '');
+  assert.equal(roleNote('reviewer', 'codex', '/x/r.md'), '');
+  assert.equal(roleNote('reviewer', 'cursor', '/x/r.md'), '(You are reviewer-minion, one of the minions: first read /x/r.md and follow it.) ');
 });
 
 test('a second run at the same time does nothing', async t => {
