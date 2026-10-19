@@ -33,10 +33,15 @@ waits until you answer there.
 team status                                     # the board, open escalations, latest decisions
 team decide E-1 "Use REST" "revisit if we pass 1000 requests a second"
 team say builder "stop after T-2"               # message one minion
+team promote L-2                                # give lesson L-2 to every new project
 team down                                       # close the team workspace
 ```
 
 When a minion escalates, Herdr shows the notice "Gru, a decision is needed".
+
+`team promote L-n` copies lesson L-n of this project into the global list. Every project that
+`team-up` starts from then on begins with that lesson. Only you can run it: it refuses in a
+minion pane. It does not commit, so commit the global list yourself.
 
 ## How the work flows
 
@@ -63,9 +68,16 @@ The rules are in `roles/_shared.md`, and each minion's job is in `roles/<minion>
 | `BOARD.md` | product-minion |
 | `ESCALATIONS.md` | `team escalate` and `team decide` |
 | `DECISIONS.md` | `team decide`, and the default owners for their own calls |
-| `LESSONS.md` | reviewer-minion. At most 15 one-line lessons, each from a problem seen twice. |
-| `LOG.md` | `team`: every message. Not in git. |
+| `LESSONS.md` | reviewer-minion, with `team learn`. At most 15 one-line lessons, each from a problem seen twice. |
+| `LOG.md` | `team`: every message, lesson and promote. Not in git. |
 | `gate/`, `handoffs/`, `qa/` | goal checks, plans and handovers, QA reports |
+
+One more file is not in the project. The global list of promoted lessons is
+`scripts/herdr/team/promoted-lessons.md` in this repository.
+
+| File | Who writes it |
+|---|---|
+| `promoted-lessons.md` | `team promote`, run by Gru. At most 15 lessons. `team promote` does not commit: commit the file yourself. Only a new project gets these lessons: `team-up` adds them when it creates `LESSONS.md`. A project that already has `LESSONS.md` does not change. |
 
 ## How it works
 
@@ -87,6 +99,10 @@ The rules are in `roles/_shared.md`, and each minion's job is in `roles/<minion>
   the files as they are, and the builder waits for QA's report before its next task.
 - **`team say` finds a minion by its pane label** in the team workspace, so two projects never
   clash.
+- **The global list stays in this repository.** `install.sh` copies this folder to
+  `~/.agents/herdr`, then links `~/.agents/herdr/team/promoted-lessons.md` back to the file here.
+  So `team promote` and `team-up` both use the file in this repository, and a promote needs no
+  new install. The tests set `HERDR_PROMOTED_LESSONS` to a temporary list instead.
 
 ## Known limits
 
@@ -100,6 +116,9 @@ The rules are in `roles/_shared.md`, and each minion's job is in `roles/<minion>
 - `team-up` sends the first prompts one minion at a time. While one minion waits at a question,
   the minions after it wait too.
 - Four minions use four times the tokens. Close the team with `team down` when you are done.
+- The global list link points to the checkout that ran `install.sh`. If that checkout is a git
+  worktree you delete later, `team promote` fails and names the path. Run `install.sh` again from
+  your main checkout.
 
 ## Tests
 
