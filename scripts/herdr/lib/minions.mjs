@@ -64,7 +64,9 @@ export function teamMembers(team) {
 export function settingsOf(name, minions, config = {}, team = null) {
   const layer = (value) => (typeof value === 'string' ? { tool: value } : value ?? {});
   const { tool = 'claude', model, effort } = minions[name] ?? {};
-  return { tool, model, effort, ...layer(config[name]), ...layer(team?.minions?.[name]) };
+  // An older config.json names the builder "coder".
+  const configured = name === 'builder' ? config.builder ?? config.coder : config[name];
+  return { tool, model, effort, ...layer(configured), ...layer(team?.minions?.[name]) };
 }
 
 // The prompt a team minion starts with: the shared rules, this team's minions, what the team does

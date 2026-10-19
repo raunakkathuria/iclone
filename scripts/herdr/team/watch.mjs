@@ -45,5 +45,7 @@ export function render({ escalations, tasks, lastLog, idleMinutes, time, width, 
   }
   if (tasks.length) entries.push([null, tasks.map(([id, status]) => `${id} ${status}`).join('  ')]);
   if (lastLog) entries.push([null, lastLog]);
-  return entries.flatMap(([color, text]) => wrap(text, width).map((line) => paint(color, line))).slice(0, rows);
+  // Text from the record files is drawn as plain characters: an escape code could clear the view.
+  const plain = (text) => text.replace(/[\x00-\x1f\x7f]/g, '');
+  return entries.flatMap(([color, text]) => wrap(plain(text), width).map((line) => paint(color, line))).slice(0, rows);
 }

@@ -59,7 +59,8 @@ if (group === 'pane') {
   if (command === 'get') return pane(args[2]) ? out({ pane: pane(args[2]) }) : fail('pane_not_found');
   if (command === 'rename') { pane(args[2]).label = args[3]; out({}); }
   if (command === 'layout') out({ layout: { panes: [{ pane_id: opt('--pane'), rect: { width: 200, height: 50 } }] } });
-  if (command === 'process-info') out({ process_info: { foreground_process_group_id: mode === 'busy' ? 2 : 1, shell_pid: 1 } });
+  // A pane's shell_pid in the state lets a test make a pane's shell an ancestor of the command.
+  if (command === 'process-info') out({ process_info: { foreground_process_group_id: mode === 'busy' ? 2 : 1, shell_pid: pane(opt('--pane'))?.shell_pid ?? 1 } });
   if (command === 'split') {
     const from = pane(opt('--pane'));
     const id = `${from.workspace_id}:p${st.next++}`;

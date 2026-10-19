@@ -584,7 +584,10 @@ function teamWorkspace(workspace) {
 // In a team, the builder waits for the findings of its herdr-review. With nothing uncommitted
 // there is nothing to review, so it is told; otherwise it would wait for ever.
 async function nothingToReview(event, root) {
-  const pane = resolveBuilder(event).pane_id;
+  const builder = resolveBuilder(event);
+  // Only the builder waits for findings; another minion's herdr-review is only noise.
+  if (![null, 'builder'].includes(roleOf(builder.label)) || SEATS.has(builder.label)) return;
+  const pane = builder.pane_id;
   const text = `herdr-review found nothing to review in ${root}: there are no uncommitted changes. In a minion team a review covers only the work that is not committed yet, so commit a task only after qa-minion passes it.`;
   if (await waitReady(pane, 'builder', 30 * MINUTE)) await sendPrompt(pane, text);
 }

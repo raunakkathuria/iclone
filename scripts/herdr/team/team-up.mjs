@@ -19,7 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MINIONS, ensureLayout, findTeam, herdr, roleNote, sendPrompt, sleep, teamLabel, waitReady } from '../lib/herdr.mjs';
+import { MINIONS, ensureLayout, findTeam, herdr, roleNote, sendPrompt, sleep, teamLabel, waitReady, whoCalls } from '../lib/herdr.mjs';
 import { CORE, DEFAULT_EXTRAS, loadMinions, promptFile, readTeam, teamMembers } from '../lib/minions.mjs';
 import { LIMIT, PROMOTED, addLesson, promotedBodies } from './lessons.mjs';
 
@@ -126,6 +126,8 @@ async function kickoff(root, pane, role) {
 }
 
 async function main() {
+  // Only Guru starts a team or adds a minion: a minion's team-up would be announced as Guru's.
+  if (whoCalls() !== 'guru') throw new Error('only Guru can start a team or add a minion. Run it outside the minion panes.');
   const names = process.argv.slice(2);
   const root = gitRoot(process.cwd()) ?? process.cwd();
   const needsGoal = scaffold(root);

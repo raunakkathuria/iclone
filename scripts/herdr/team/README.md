@@ -58,7 +58,9 @@ team promote L-2                                     # give lesson L-2 to every 
 team down                                            # close the team workspace
 ```
 
-`team decide`, `team promote` and `team down` refuse in a minion pane: only you run them.
+`team decide`, `team promote`, `team down` and `team-up` refuse in a minion pane: only you run
+them. `team learn` is for you and `reviewer-minion` only, because every minion must follow the
+lessons.
 
 `team promote L-n` copies lesson L-n of this project into the global list. Every project that
 `team-up` starts from then on begins with that lesson. It does not commit, so commit the global
@@ -173,6 +175,10 @@ change.
   because the builder commits a task only after QA passes it.
 - **`team` finds the team by its name and its folder**, so two projects with the same folder name
   never share a team.
+- **`team` knows who runs it from the process tree**, not only from `HERDR_PANE_ID`, which any
+  process can change. A command is a minion's when the pane `HERDR_PANE_ID` names is a minion, or
+  when a minion pane's shell is one of its parent processes. When it cannot tell, it refuses
+  Guru's commands.
 - **The global list stays in this repository.** `install.sh` copies this folder to
   `~/.agents/herdr`, then links `~/.agents/herdr/team/promoted-lessons.md` back to the file here.
   So a promote needs no new install. The tests set `HERDR_PROMOTED_LESSONS` to a temporary list.

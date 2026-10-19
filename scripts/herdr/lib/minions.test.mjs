@@ -36,6 +36,8 @@ test('settingsOf layers the minion file, config.json and team.json', () => {
     { tool: 'claude', model: 'opus', effort: 'low' });
   // A minion file with no tool runs on Claude.
   assert.equal(settingsOf('docs', minions).tool, 'claude');
+  // An older config.json names the builder "coder".
+  assert.equal(settingsOf('builder', { builder: { tool: 'claude' } }, { coder: 'kiro' }).tool, 'kiro');
 });
 
 test('projectOf finds the nearest folder with a .team/ folder', t => {

@@ -234,7 +234,7 @@ test('team labels and role arguments', () => {
   // The minions share one folder: only the builder may switch branches or commit.
   const qa = roleArgs('qa', 'claude', '/x/qa.md');
   assert.deepEqual(qa.slice(0, 5), ['--append-system-prompt-file', '/x/qa.md', '--allowedTools', 'Bash(team:*)', '--disallowedTools']);
-  for (const command of ['git checkout', 'git push', 'git clean', 'git rm', 'git -C', 'git -c', 'gh pr checkout']) {
+  for (const command of ['git checkout', 'git push', 'git clean', 'git rm', 'git -C', 'git -c', 'git --git-dir', 'git --work-tree', 'gh pr checkout']) {
     assert.ok(qa.includes(`Bash(${command}:*)`), command);
   }
   const codex = roleArgs('reviewer', 'codex', '/x/reviewer.md');

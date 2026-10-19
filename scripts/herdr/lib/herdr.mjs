@@ -87,6 +87,41 @@ export function roleOf(label) {
   return null;
 }
 
+// The process IDs from pid up to the first process. Throws when ps cannot tell.
+function ancestors(pid) {
+  const found = new Set();
+  for (let p = pid; p > 1 && !found.has(p);) {
+    found.add(p);
+    p = Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(p)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+  }
+  return found;
+}
+
+// Who runs this command: a minion's role, "guru", or null when that cannot be told. Any process
+// can set HERDR_PANE_ID, so two signals are checked, and either one can make the caller a
+// minion: the pane HERDR_PANE_ID names, and a minion pane whose shell is an ancestor of this
+// process. A failure to tell gives null, so Guru's commands refuse. Only a process that is in no
+// minion pane is Guru: in the guru pane, or in a terminal outside Herdr.
+export function whoCalls() {
+  const claimed = process.env.HERDR_PANE_ID;
+  if (claimed) {
+    try {
+      const role = roleOf(herdr('pane', 'get', claimed).pane?.label);
+      if (role) return role;
+    } catch { return null; }
+  }
+  let mine;
+  try { mine = ancestors(process.pid); } catch { return null; }
+  let panes;
+  try { panes = herdr('pane', 'list').panes; } catch { return process.env.HERDR_ENV === '1' ? null : 'guru'; }
+  for (const pane of panes.filter((p) => roleOf(p.label))) {
+    try {
+      if (mine.has(herdr('pane', 'process-info', '--pane', pane.pane_id).process_info.shell_pid)) return roleOf(pane.label);
+    } catch { return null; }
+  }
+  return 'guru';
+}
+
 // The tool to start in an empty reviewer pane: PR_REVIEWER if set, else the reviewer's tool,
 // unless the builder already uses that tool; then the builder's configured tool.
 // tools: { builder, reviewer }, the configured tool of each.
@@ -143,9 +178,11 @@ const AGENT_ARGS = { codex: ['-c', 'check_for_update_on_startup=false'] };
 
 // The minions share one project folder, so only the builder may change it through git: a
 // checkout by another minion would swap the builder's files under it.
-// "git -C <dir>" and "git -c <key>" start with an option, so they are denied too.
+// "git -C <dir>", "git -c <key>", "git --git-dir" and "git --work-tree" start with an option, so
+// they are denied too.
 const GIT_WRITES = ['git checkout', 'git switch', 'git stash', 'git reset', 'git restore', 'git commit', 'git merge',
-  'git rebase', 'git pull', 'git push', 'git cherry-pick', 'git clean', 'git rm', 'git -C', 'git -c', 'gh pr checkout']
+  'git rebase', 'git pull', 'git push', 'git cherry-pick', 'git clean', 'git rm', 'git -C', 'git -c', 'git --git-dir',
+  'git --work-tree', 'gh pr checkout']
   .map((c) => `Bash(${c}:*)`);
 // The tools that take their role when they start. Any other tool gets roleNote with each message.
 const ROLE_AT_START = new Set(['claude', 'codex']);
