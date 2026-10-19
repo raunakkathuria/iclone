@@ -1,8 +1,8 @@
 // Run: node --test team/team.test.mjs
 // Runs team-up and team against the fake herdr, in a throwaway project folder.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -391,6 +391,24 @@ test('team-up qa starts the pair and qa, and team-up product adds product to the
   assert.match(prompts(paneIn('builder-minion')).at(-1), /^Guru added product-minion to the team\. Its job: Owns the product/);
   assert.equal(prompts(paneIn('builder-minion')).length, 2);
   assert.match(run(TEAM_UP, ['security'], app).err, /there is no minion named security\. The minions: builder, reviewer, product, qa\./);
+  assert.equal(run(TEAM, ['down'], app).code, 0);
+});
+
+test('a new team in a git project marks it as reviewed up to now', () => {
+  const app = join(dir, 'git-app');
+  mkdirSync(app);
+  const git = (...args) => execFileSync('git', ['-C', app, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q');
+  writeFileSync(join(app, 'a.txt'), 'one\n');
+  git('add', '.');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'first');
+  run(TEAM_UP, ['qa'], app);
+  writeFileSync(join(app, '.team', 'GOAL.md'), '# GOAL\nGit.\n');
+  assert.equal(run(TEAM_UP, [], app).code, 0);
+  // The team's first review starts here, not at the start of the branch.
+  const marks = readdirSync(join(dir, 'state', 'reviewed'));
+  assert.equal(marks.length, 1);
+  assert.match(readFileSync(join(dir, 'state', 'reviewed', marks[0]), 'utf8'), /"branch":"(main|master)","tree":"[0-9a-f]{40}"/);
   assert.equal(run(TEAM, ['down'], app).code, 0);
 });
 
