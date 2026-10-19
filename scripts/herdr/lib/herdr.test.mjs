@@ -113,7 +113,7 @@ test('tryLock lets one run in and frees the lock on release', () => {
 
 test('a new workspace gets a reviewer pane to the right, and both tools start', async t => {
   const herdr = fakeHerdr(t, [shell('w1:p1')]);
-  assert.deepEqual(await ensureLayout('w1', CONFIG), { builder: 'w1:p1', reviewer: 'w1:p2' });
+  assert.deepEqual(await ensureLayout('w1', CONFIG), { builder: 'w1:p1', reviewer: 'w1:p2', started: ['builder', 'reviewer'] });
   const [builder, reviewer] = herdr.panes();
   assert.equal(builder.label, 'builder-minion');
   assert.equal(reviewer.label, 'reviewer-minion');
@@ -165,7 +165,7 @@ test('a pane busy with another program gets no agent', async t => {
 test('a team workspace gets four minions in a 2x2 grid, each with its role', async t => {
   const herdr = fakeHerdr(t, [shell('w1:p1')], 'ok', [{ workspace_id: 'w1', label: 'app minions' }]);
   const team = { ...CONFIG, product: 'claude', qa: 'claude' };
-  assert.deepEqual(await ensureLayout('w1', team), { builder: 'w1:p1', reviewer: 'w1:p2', product: 'w1:p3', qa: 'w1:p4' });
+  assert.deepEqual(await ensureLayout('w1', team), { builder: 'w1:p1', reviewer: 'w1:p2', product: 'w1:p3', qa: 'w1:p4', started: ['builder', 'reviewer', 'product', 'qa'] });
   assert.deepEqual(herdr.panes().map((p) => p.label), ['builder-minion', 'reviewer-minion', 'product-minion', 'qa-minion']);
   // Reviewer to the right of the builder; product below the builder; QA below the reviewer.
   const splits = herdr.calls().filter((a) => a[1] === 'split').map((a) => [a[a.indexOf('--pane') + 1], a[a.indexOf('--direction') + 1]]);

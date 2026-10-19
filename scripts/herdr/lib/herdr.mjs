@@ -184,6 +184,9 @@ export async function startAgent(pane, role, kind, args = []) {
 
 const READY = new Set(['idle', 'done']);
 
+// Whether the agent in the pane is ready for input now.
+export const agentReady = (pane) => READY.has(herdr('agent', 'get', pane).agent.agent_status);
+
 // Waits until the agent is ready for input. Tells the human once if it is waiting for them.
 // With checks = 2 the agent must be ready twice in a row, 3 seconds apart: between two of its
 // questions, an agent such as Kiro looks ready for a moment.
@@ -244,7 +247,8 @@ export async function withLock(key, work, staleMs = 180 * MINUTE) {
 // Makes sure the workspace has its minions, each with a tool running: a builder and a reviewer,
 // and in a team workspace also a product and a QA minion, in a 2x2 grid. Safe to run many times:
 // it only adds what is missing and never touches a running agent. Returns the pane ID of each
-// role, or null when another run is doing the work.
+// role and, in started, the roles it started a tool for; or null when another run is doing the
+// work.
 export async function ensureLayout(workspace, config = loadConfig(), builderId = null) {
   const release = tryLock(`layout-${workspace.replace(/[^A-Za-z0-9_-]/g, '-')}`);
   if (!release) return null;
@@ -277,14 +281,16 @@ export async function ensureLayout(workspace, config = loadConfig(), builderId =
       found.qa ??= split(found.reviewer, 'down', 'qa');
     }
     let builderTool = builder.agent ?? builder.agent_session?.agent;
+    const started = [];
     for (const role of roles) {
       const pane = found[role];
       if (!isFreeShell(pane)) continue;
       const tool = role === 'reviewer' ? pickReviewer(builderTool ?? config.builder, config, process.env) : config[role];
       if (role === 'builder') builderTool = tool;
       await startAgent(pane.pane_id, role, tool, team ? roleArgs(role, tool) : []);
+      started.push(role);
       log(`layout ${workspace}: started ${tool} in ${role} ${pane.pane_id}`);
     }
-    return Object.fromEntries(roles.map((role) => [role, found[role].pane_id]));
+    return { ...Object.fromEntries(roles.map((role) => [role, found[role].pane_id])), started };
   } finally { release(); }
 }

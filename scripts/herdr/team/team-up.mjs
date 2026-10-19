@@ -57,7 +57,7 @@ async function layout(ws) {
   for (let i = 0; i < 60; i++) {
     const panes = await ensureLayout(ws);
     const running = new Set(herdr('pane', 'list', '--workspace', ws).panes.filter((p) => p.agent).map((p) => p.pane_id));
-    if (panes?.qa && Object.values(panes).every((id) => running.has(id))) return panes;
+    if (panes?.qa && Object.keys(MINIONS).every((role) => running.has(panes[role]))) return panes;
     await sleep(3000);
   }
   throw new Error(`the minions in workspace ${ws} did not all start. Look at the panes for a question to answer.`);

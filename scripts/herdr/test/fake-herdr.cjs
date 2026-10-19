@@ -44,6 +44,10 @@ if (group === 'pane') {
   if (command === 'list') {
     const workspace = args[2] === '--workspace' ? args[3] : null;
     if (workspace && mode === 'layout-failed') fail('pane_not_found');
+    // In mode resume, a pane with a session gets its agent back on the third list.
+    if (workspace && mode === 'resume' && (st.lists = (st.lists ?? 0) + 1) >= 3) {
+      for (const p of st.panes) if (p.agent_session && !p.agent) p.agent = p.agent_session.agent;
+    }
     out({ panes: st.panes.filter((p) => !workspace || p.workspace_id === workspace) });
   }
   if (command === 'get') return pane(args[2]) ? out({ pane: pane(args[2]) }) : fail('pane_not_found');
@@ -76,6 +80,13 @@ if (group === 'agent') {
     if (reviewer && mode === 'startup-failed') fail('agent_not_found');
     // In mode flicker, the reviewer looks idle for a moment in the middle of its review, and
     // writes its findings only after that.
+    // In mode late-findings, the reviewer looks ready before its review is done, works once more,
+    // and writes its findings only after that, as Cursor does while it waits on a shell command.
+    if (reviewer && mode === 'late-findings' && st.pendingLate) {
+      st.lateGets = (st.lateGets ?? 0) + 1;
+      if (st.lateGets === 6) { fs.writeFileSync(st.pendingLate, 'No findings.\n'); delete st.pendingLate; }
+      out({ agent: { agent: pane(args[2])?.agent, agent_status: st.lateGets === 3 ? 'working' : 'idle' } });
+    }
     if (reviewer && mode === 'flicker' && st.pendingFindings) {
       st.flicker = (st.flicker ?? 0) + 1;
       if (st.flicker === 2) { fs.writeFileSync(st.pendingFindings, 'No findings.\n'); delete st.pendingFindings; }
@@ -91,6 +102,7 @@ if (group === 'agent') {
     if (findings) st.reviewPrompts = (st.reviewPrompts ?? 0) + 1;
     const dropped = mode === 'drop-first' && st.reviewPrompts === 1;
     if (findings && mode === 'flicker') st.pendingFindings = findings[1];
+    else if (findings && mode === 'late-findings') st.pendingLate = findings[1];
     else if (findings && mode !== 'no-findings-file' && !dropped) fs.writeFileSync(findings[1], 'No findings.\n');
     out({});
   }

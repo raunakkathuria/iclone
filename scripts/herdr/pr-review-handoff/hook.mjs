@@ -27,8 +27,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  CLEAR_COMMAND, STATE_DIR, ensureLayout, herdr, loadConfig, log, notify, roleOf, sendPrompt, sleep, waitReady,
-  withLock,
+  CLEAR_COMMAND, STATE_DIR, agentReady, ensureLayout, herdr, isTeam, loadConfig, log, notify, roleOf, sendPrompt,
+  sleep, waitReady, withLock,
 } from '../lib/herdr.mjs';
 
 // Shell tool names: Claude Code and Codex "Bash", Cursor "Shell", Kiro V2 "shell", Kiro V3 "execute_bash".
@@ -46,6 +46,11 @@ const HOUR = 3_600_000;
 const MINUTE = 60_000;
 // A reviewer that is ready again this soon, with no review, never got the prompt.
 const LOST_PROMPT_MS = Number(process.env.PR_HANDOFF_LOST_PROMPT_MS) || 20_000;
+// How long a ready reviewer with no review gets before it counts as stopped. Herdr can show a
+// reviewer as ready while it still works: Cursor, for one, looks idle while it waits on a long
+// shell command. A reviewer that may have dropped the prompt gets at most 30 seconds.
+const SETTLE_MS = Number(process.env.PR_HANDOFF_SETTLE_MS) || 5 * MINUTE;
+const LOST_SETTLE_MS = Math.min(SETTLE_MS, 30_000);
 
 // What the coder is told at the start of each session, so that it asks for a review when done.
 export const CODER_RULE = [
@@ -211,21 +216,24 @@ export function repoOf(url) {
 }
 
 // The reviewer pane starts in the workspace folder, which can be another checkout than the
-// coder's, so every review prompt names the checkout to work in.
-function reviewerRules(root) {
+// coder's, so every review prompt names the checkout to work in. In a minion team, the builder
+// writes its notes for the reviewer in the task's handoff file: a message sent just before the
+// review would be lost when the review clears the reviewer's context.
+function reviewerRules(root, team = false) {
   return [
     'You are an independent reviewer: you did not write this change, so judge it only by the code and the repository rules.',
     'You are not the coder, so do not run herdr-review.',
     `Work in ${root}: run every command there, and first read the AGENTS.md or CLAUDE.md there. If it defines a code-verifier or reviewer role, act as that role.`,
     `If ${root}/.team/LESSONS.md exists, check the change against each lesson in it, and name the lesson (for example L-2) in each finding it covers.`,
+    ...(team ? [`First read the builder's notes on this change: the handoff file in ${root}/.team/handoffs/ of the task in REVIEW on ${root}/.team/BOARD.md.`] : []),
   ];
 }
 const FINDINGS = 'Write only actionable findings, ranked P0 (must fix before merge) to P3 (nice to have), each with file:line and a one-line fix.';
 
-export function reviewPrompt(pr, root) {
+export function reviewPrompt(pr, root, team = false) {
   return [
     `Review pull request ${pr.url} (#${pr.number}). Its repository is checked out in ${root}.`,
-    ...reviewerRules(root),
+    ...reviewerRules(root, team),
     `Use gh pr view ${pr.url} and gh pr diff ${pr.url}. Always pass the full URL, not the number.`,
     'Check correctness, security, tests, and fit with the project rules.',
     'Do not edit, commit or push anything.',
@@ -248,10 +256,10 @@ export function fixPrompt(pr, reviewUrl, reviewer) {
   ].join(' ');
 }
 
-export function localReviewPrompt({ root, base, file }) {
+export function localReviewPrompt({ root, base, file, team = false }) {
   return [
     `Review the local changes in the git repository ${root}. They have no pull request.`,
-    ...reviewerRules(root),
+    ...reviewerRules(root, team),
     `See the changes with git -C ${root} status and git -C ${root} diff ${base}. Read new untracked files too.`,
     'Check correctness, security, tests, and fit with the project rules.',
     `Do not edit, commit or push anything. The only file you write is ${file}.`,
@@ -326,12 +334,14 @@ function hashGit(root, args, hash, input = null) {
 }
 
 // The local changes to review: everything since the branch left the remote's default branch,
-// committed or not, and untracked files. Null when there is nothing to review. The hash covers
-// the diff and the content of each untracked file, so any new change gets a new review.
+// committed or not, and untracked files. In a minion team, only what is not committed yet: the
+// builder commits each task after QA passes it, so this is the task in review, not the branch.
+// Null when there is nothing to review. The hash covers the diff and the content of each
+// untracked file, so any new change gets a new review.
 // A git failure throws: it is reported, never taken for "no changes".
-async function localChanges(root) {
+async function localChanges(root, team = false) {
   let base = 'HEAD';
-  for (const ref of ['origin/HEAD', 'origin/main', 'origin/master']) {
+  for (const ref of team ? [] : ['origin/HEAD', 'origin/main', 'origin/master']) {
     try { base = git(root, 'merge-base', 'HEAD', ref); break; } catch { /* no such ref */ }
   }
   const quiet = spawnSync('git', ['-C', root, 'diff', '--quiet', base], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
@@ -407,16 +417,18 @@ function resolveBuilder(event) {
 }
 
 // The reviewer pane in the coder's workspace, with a tool running. The layout adds the pane, or
-// starts a tool in it, when that is missing; in a team workspace the tool gets its role.
+// starts a tool in it, when that is missing; in a team workspace the tool gets its role. It waits
+// while another run (the plugin) holds the layout lock, or while a tool resumes in the pane.
+// Only a tool this run started has an empty context; a resumed one still needs clearing.
 async function getReviewer(builder) {
   const find = () => findReviewerPane(herdr('pane', 'list', '--workspace', builder.workspace_id).panes, builder);
   let pane = find();
   let fresh = false;
-  // Another run (the plugin) may hold the layout lock; then wait for it to finish.
-  for (let i = 0; i < 12 && !pane?.agent; i++) {
-    if (!(await ensureLayout(builder.workspace_id, loadConfig(), builder.pane_id))) await sleep(5000);
+  for (let i = 0; i < 24 && !pane?.agent; i++) {
+    const layout = await ensureLayout(builder.workspace_id, loadConfig(), builder.pane_id);
+    if (layout?.started?.includes('reviewer')) fresh = true;
     pane = find();
-    fresh = true;
+    if (!pane?.agent) await sleep(5000);
   }
   if (!pane) throw new Error(`No reviewer pane in workspace ${builder.workspace_id}.`);
   if (!pane.agent) throw new Error(`No tool runs in the reviewer pane ${pane.pane_id}. Start one there.`);
@@ -461,14 +473,17 @@ async function runReview(job) {
         }
         log(`${job.key}: review started in ${reviewer.pane}`);
         if (!(await waitReady(reviewer.pane, who, 180 * MINUTE, 2))) return log(`${job.key}: review still running after 3 hours`);
-        // "Ready" alone does not prove a review: the prompt may have landed on a dialog.
-        const done = job.after(before);
+        // "Ready" alone does not prove a review: the prompt may have landed on a dialog, or the
+        // reviewer may still be working while it looks ready.
+        const lost = Date.now() - sent < LOST_PROMPT_MS;
+        const { done, worked, timeout } = await settle(job, before, reviewer.pane, who, lost ? LOST_SETTLE_MS : SETTLE_MS);
+        if (timeout) return log(`${job.key}: review still running after 3 hours`);
         if (done) {
           log(`${job.key}: review done: ${done}`);
           return done;
         }
         // A real review takes longer than this. Codex, for one, drops the first prompt after /new.
-        if (Date.now() - sent < LOST_PROMPT_MS && attempt < 3) {
+        if (lost && !worked && attempt < 3) {
           log(`${job.key}: reviewer ${reviewer.pane} was ready again at once with no review; sending the prompt again`);
           await sleep(3000);
           continue;
@@ -489,6 +504,26 @@ async function runReview(job) {
   }
   // Outside the lock: waiting for a busy coder must not hold up other reviews.
   if (result) await handBack(job, result, reviewer.tool);
+}
+
+// Waits up to firstMs for the review result while the reviewer looks ready. Whenever the
+// reviewer is working again, it waits for it to be ready, and then gives it SETTLE_MS.
+// Returns { done } with the result, worked when the reviewer worked again, or timeout.
+async function settle(job, before, pane, who, firstMs) {
+  const poll = Math.min(10_000, Math.max(500, SETTLE_MS / 4));
+  let worked = false;
+  let end = Date.now() + firstMs;
+  for (;;) {
+    const done = job.after(before);
+    if (done || Date.now() >= end) return { done, worked };
+    if (!agentReady(pane)) {
+      worked = true;
+      if (!(await waitReady(pane, who, 180 * MINUTE, 2))) return { timeout: true };
+      end = Date.now() + SETTLE_MS;
+      continue;
+    }
+    await sleep(poll);
+  }
 }
 
 // Asks the coder to fix the findings. It waits until the coder is free, so it never interrupts
@@ -540,6 +575,19 @@ async function prepare(tool, event, key, title) {
   return { builder, builderTool, slotKey, key, token, title };
 }
 
+// Whether the workspace is a minion team: its label ends in " minions".
+function teamWorkspace(workspace) {
+  try { return isTeam(herdr('workspace', 'get', workspace).workspace?.label); } catch { return false; }
+}
+
+// In a team, the builder waits for the findings of its herdr-review. With nothing uncommitted
+// there is nothing to review, so it is told; otherwise it would wait for ever.
+async function nothingToReview(event, root) {
+  const pane = resolveBuilder(event).pane_id;
+  const text = `herdr-review found nothing to review in ${root}: there are no uncommitted changes. In a minion team a review covers only the work that is not committed yet, so commit a task only after qa-minion passes it.`;
+  if (await waitReady(pane, 'builder', 30 * MINUTE)) await sendPrompt(pane, text);
+}
+
 async function prWorker(tool, event) {
   const command = withoutHeredocs(event.tool_input.command);
   const dir = commandDir(command, eventDir(event, process.env));
@@ -558,7 +606,7 @@ async function prWorker(tool, event) {
   if (!job) return;
   await runReview({
     ...job,
-    prompt: reviewPrompt(pr, gitRoot(dir) ?? dir),
+    prompt: reviewPrompt(pr, gitRoot(dir) ?? dir, teamWorkspace(process.env.HERDR_WORKSPACE_ID)),
     before: () => reviews(pr),
     // A new review on the PR proves the review happened. Plain comments do not count.
     after: (before) => {
@@ -573,9 +621,13 @@ async function localWorker(tool, event) {
   const dir = commandDir(withoutHeredocs(event.tool_input.command), eventDir(event, process.env), HERDR_REVIEW);
   const root = gitRoot(dir);
   if (!root) return log(`skip herdr-review in ${dir}: not a git repository`);
-  const changes = await localChanges(root);
-  if (!changes) return log(`skip herdr-review in ${root}: no changes`);
-  const local = { root, ...changes, file: join(FINDINGS_DIR, `${Date.now()}-${changes.hash.slice(0, 8)}.md`) };
+  const team = teamWorkspace(process.env.HERDR_WORKSPACE_ID);
+  const changes = await localChanges(root, team);
+  if (!changes) {
+    if (team) await nothingToReview(event, root);
+    return log(`skip herdr-review in ${root}: no changes`);
+  }
+  const local = { root, team, ...changes, file: join(FINDINGS_DIR, `${Date.now()}-${changes.hash.slice(0, 8)}.md`) };
   const job = await prepare(tool, event, `local:${local.root}:${local.hash}`, `local changes in ${local.root.split('/').at(-1)}`);
   if (!job) return;
   mkdirSync(FINDINGS_DIR, { recursive: true });
