@@ -68,7 +68,7 @@ export function settingsOf(name, minions, config = {}, team = null) {
 }
 
 // The prompt a team minion starts with: the shared rules, this team's minions, what the team does
-// for a minion it does not have, and the minion's own role. It is saved in .team/prompts/ so Gru
+// for a minion it does not have, and the minion's own role. It is saved in .team/prompts/ so Guru
 // can read exactly what each minion was told. Returns the file's path.
 export function writePrompt(root, name, minions, members, folder = FOLDER) {
   const roster = members.map((member) => `- **${member}-minion**: ${minions[member]?.job ?? ''}`);

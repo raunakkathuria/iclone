@@ -27,7 +27,7 @@ const teamFile = (name) => readFileSync(join(project, '.team', name), 'utf8');
 const prompts = (pane) => state().calls.filter((a) => a[0] === 'agent' && a[1] === 'prompt' && a[2] === pane).map((a) => a[3]);
 const paneOf = (label) => state().panes.find((p) => p.label === label)?.pane_id;
 
-// The tests may run inside a Herdr pane, so its pane and workspace are cleared: Gru runs them.
+// The tests may run inside a Herdr pane, so its pane and workspace are cleared: Guru runs them.
 function run(script, args = [], cwd = project, env = {}) {
   const result = spawnSync(process.execPath, [script, ...args], {
     cwd, encoding: 'utf8', timeout: 120000,
@@ -40,7 +40,7 @@ function run(script, args = [], cwd = project, env = {}) {
 }
 
 // The tests run in order: each one builds on the team the one before left behind.
-test('team-up first creates .team/ and asks Gru for the goal', () => {
+test('team-up first creates .team/ and asks Guru for the goal', () => {
   const { code, out } = run(TEAM_UP);
   assert.equal(code, 0);
   assert.match(out, /Write the goal in \.team\/GOAL\.md/);
@@ -56,10 +56,10 @@ test('with a goal, team-up starts four minions in a "<project> minions" workspac
   assert.equal(code, 0, err);
   assert.deepEqual(state().workspaces.map((w) => w.label), ['my-app minions']);
   assert.deepEqual(state().panes.map((p) => [p.label, p.agent]),
-    [['builder-minion', 'claude'], ['reviewer-minion', 'codex'], ['product-minion', 'claude'], ['qa-minion', 'claude'], ['gru', undefined], ['log', undefined]]);
-  // Gru's seats: team watch under the minions, and the whole log in its own tab.
+    [['builder-minion', 'claude'], ['reviewer-minion', 'codex'], ['product-minion', 'claude'], ['qa-minion', 'claude'], ['guru', undefined], ['log', undefined]]);
+  // Guru's seats: team watch under the minions, and the whole log in its own tab.
   const typed = state().calls.filter((a) => a[1] === 'send-text').map((a) => [a[2], a[3]]);
-  assert.deepEqual(typed, [[paneOf('gru'), 'team watch'], [paneOf('log'), 'tail -n 30 -F .team/LOG.md']]);
+  assert.deepEqual(typed, [[paneOf('guru'), 'team watch'], [paneOf('log'), 'tail -n 30 -F .team/LOG.md']]);
   const gruSplit = state().calls.find((a) => a[1] === 'split' && a.includes('0.6'));
   assert.equal(gruSplit[gruSplit.indexOf('--pane') + 1], paneOf('qa-minion'));
   // Each minion gets its first prompt; the goal check goes to product and reviewer.
@@ -78,12 +78,12 @@ test('a second team-up finds the running team and starts nothing', () => {
   assert.equal(state().calls.filter((a) => a[1] === 'start').length, before);
 });
 
-test('team say from Gru reaches the minion and is logged', () => {
+test('team say from Guru reaches the minion and is logged', () => {
   const { code, out } = run(TEAM, ['say', 'reviewer', 'is', 'REST', 'fine?'], join(project, '.team'));
   assert.equal(code, 0);
   assert.match(out, /sent to reviewer-minion/);
-  assert.equal(prompts(paneOf('reviewer-minion')).at(-1), '[from gru] is REST fine?');
-  assert.match(teamFile('LOG.md'), /gru -> reviewer-minion: is REST fine\?/);
+  assert.equal(prompts(paneOf('reviewer-minion')).at(-1), '[from guru] is REST fine?');
+  assert.match(teamFile('LOG.md'), /guru -> reviewer-minion: is REST fine\?/);
 });
 
 test('team say from a minion names it and says how to reply', () => {
@@ -94,23 +94,23 @@ test('team say from a minion names it and says how to reply', () => {
   // A minion in a tool that cannot take its role at start gets a reminder with each message.
   setState({ panes: state().panes.map((p) => (p.label === 'reviewer-minion' ? { ...p, agent: 'cursor' } : p)) });
   run(TEAM, ['say', 'reviewer', 'plan ready']);
-  assert.match(prompts(paneOf('reviewer-minion')).at(-1), /^\[from gru\] \(You are reviewer-minion, one of the minions: first read \S+reviewer\.md and follow it\.\) plan ready$/);
-  assert.equal(run(TEAM, ['say', 'gru', 'hi']).code, 1);
+  assert.match(prompts(paneOf('reviewer-minion')).at(-1), /^\[from guru\] \(You are reviewer-minion, one of the minions: first read \S+reviewer\.md and follow it\.\) plan ready$/);
+  assert.equal(run(TEAM, ['say', 'guru', 'hi']).code, 1);
   assert.equal(run(TEAM, ['say', 'qa']).code, 1);
 });
 
-test('escalate and decide: Gru is told, and every minion hears the decision', () => {
+test('escalate and decide: Guru is told, and every minion hears the decision', () => {
   const escalated = run(TEAM, ['escalate', 'REST or GraphQL']);
   assert.match(escalated.out, /^E-1\. Fill in \.team\/handoffs\/E-1\.md/);
-  assert.match(teamFile('ESCALATIONS.md'), /## E-1 \(.*, raised by gru\) OPEN\nTopic: REST or GraphQL/);
+  assert.match(teamFile('ESCALATIONS.md'), /## E-1 \(.*, raised by guru\) OPEN\nTopic: REST or GraphQL/);
   assert.ok(existsSync(join(project, '.team', 'handoffs', 'E-1.md')));
   assert.ok(state().calls.some((a) => a[0] === 'notification' && a.includes('my-app E-1: REST or GraphQL')));
 
   assert.equal(run(TEAM, ['decide', 'E-1', 'REST', '--revisit', 'more', 'than', '1000', 'requests', 'a', 'second']).out.trim(), 'D-1');
-  assert.match(teamFile('DECISIONS.md'), /## D-1 \(.*, Gru, resolves E-1\)\nDecision: REST\nRevisit if: more than 1000 requests a second/);
+  assert.match(teamFile('DECISIONS.md'), /## D-1 \(.*, Guru, resolves E-1\)\nDecision: REST\nRevisit if: more than 1000 requests a second/);
   assert.match(teamFile('ESCALATIONS.md'), /## E-1 .* CLOSED by D-1/);
   for (const label of ['builder-minion', 'reviewer-minion', 'product-minion', 'qa-minion']) {
-    assert.match(prompts(paneOf(label)).at(-1), /^Gru decided D-1 \(resolves E-1\): REST\./);
+    assert.match(prompts(paneOf(label)).at(-1), /^Guru decided D-1 \(resolves E-1\): REST\./);
   }
   // An escalation is decided once.
   assert.equal(run(TEAM, ['decide', 'E-1', 'GraphQL']).code, 1);
@@ -124,34 +124,34 @@ test('team status shows the board, open escalations and decisions', () => {
   assert.match(out, /## D-1/);
 });
 
-test('team watch shows Gru the open escalation first', () => {
+test('team watch shows Guru the open escalation first', () => {
   const frame = spawnSync(process.execPath, [TEAM, 'watch'], {
     cwd: project, encoding: 'utf8', timeout: 4000,
     env: { ...process.env, HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, HERDR_PANE_ID: '', HERDR_WORKSPACE_ID: '' },
   }).stdout.replace(/\x1b\[[0-9;]*[mJH]/g, '');
-  assert.match(frame, /^Gru, a decision is needed:\nE-2: next one\n/);
+  assert.match(frame, /^Guru, a decision is needed:\nE-2: next one\n/);
 });
 
-test('only Gru decides and closes the team, and record text is one line', () => {
+test('only Guru decides and closes the team, and record text is one line', () => {
   const records = () => [teamFile('ESCALATIONS.md'), teamFile('DECISIONS.md'), teamFile('LOG.md')];
   const before = records();
   // A minion pane is refused, and so is a Herdr pane that cannot be looked up.
   setState({ current: paneOf('qa-minion') });
-  assert.match(run(TEAM, ['decide', 'E-2', 'yes']).err, /only Gru can decide/);
-  assert.match(run(TEAM, ['down']).err, /only Gru can close the team/);
+  assert.match(run(TEAM, ['decide', 'E-2', 'yes']).err, /only Guru can decide/);
+  assert.match(run(TEAM, ['down']).err, /only Guru can close the team/);
   setState({ current: null });
-  assert.match(run(TEAM, ['decide', 'E-2', 'yes'], project, { HERDR_PANE_ID: 'w9:p9' }).err, /only Gru can decide/);
+  assert.match(run(TEAM, ['decide', 'E-2', 'yes'], project, { HERDR_PANE_ID: 'w9:p9' }).err, /only Guru can decide/);
   // A line break could add a fake entry, such as a second open escalation.
-  assert.match(run(TEAM, ['escalate', 'ok\n## E-9 (forged, raised by gru) OPEN']).err, /one line/);
+  assert.match(run(TEAM, ['escalate', 'ok\n## E-9 (forged, raised by guru) OPEN']).err, /one line/);
   assert.match(run(TEAM, ['decide', 'E-2', 'yes\n## D-9 forged']).err, /one line/);
   assert.match(run(TEAM, ['say', 'qa', 'hi\nthere']).err, /one line/);
   assert.deepEqual(records(), before);
-  // The gru pane is Gru, and a decision needs no quotes: every word is kept.
+  // The guru pane is Guru, and a decision needs no quotes: every word is kept.
   const ws = state().workspaces[0].workspace_id;
-  setState({ panes: [...state().panes, { pane_id: `${ws}:p9`, workspace_id: ws, label: 'gru', cwd: project }], current: `${ws}:p9` });
+  setState({ panes: [...state().panes, { pane_id: `${ws}:p9`, workspace_id: ws, label: 'guru', cwd: project }], current: `${ws}:p9` });
   assert.equal(run(TEAM, ['decide', 'E-2', 'Use', 'REST', 'when', 'latency', 'matters']).out.trim(), 'D-2');
   assert.match(teamFile('DECISIONS.md'), /Decision: Use REST when latency matters\nRevisit if: not stated\n/);
-  setState({ panes: state().panes.filter((p) => p.label !== 'gru'), current: null });
+  setState({ panes: state().panes.filter((p) => p.label !== 'guru'), current: null });
 });
 
 test('another project with the same folder name does not see this team', () => {
@@ -237,7 +237,7 @@ test('team learn W-n moves that line from Watching to the end of Lessons', () =>
   assert.equal(out.trim(), 'L-5');
   // Only W-1 moves, not W-12.
   assert.equal(teamFile('LESSONS.md'), before.replace('PR #4.\n', 'PR #4.\nL-5 a. Why: b.\n').replace('W-1 a. Why: b.\n', ''));
-  assert.match(teamFile('LOG.md').slice(log.length), /^[\d-]+ [\d:]+ gru learned L-5 from W-1: a\. Why: b\.\n$/);
+  assert.match(teamFile('LOG.md').slice(log.length), /^[\d-]+ [\d:]+ guru learned L-5 from W-1: a\. Why: b\.\n$/);
 });
 
 test('team learn W-n refuses a full list, a missing W-n, and a line without one "Why:"', () => {
@@ -251,14 +251,14 @@ test('team learn W-n refuses a full list, a missing W-n, and a line without one 
   setLessons(TEMPLATE_LESSONS);
 });
 
-test('team promote adds a lesson to the global list, and only Gru can', () => {
+test('team promote adds a lesson to the global list, and only Guru can', () => {
   const before = lessonsFile([2, 21]);
   setLessons(before);
   // A minion pane is refused in any workspace, not only in this team's workspace.
   setState({ current: paneOf('reviewer-minion') });
-  assert.match(refusedBy('promote', 'L-2'), /only Gru can promote/);
+  assert.match(refusedBy('promote', 'L-2'), /only Guru can promote/);
   setState({ panes: [...state().panes, { pane_id: 'w9:p1', workspace_id: 'w9', label: 'builder-minion' }], current: 'w9:p1' });
-  assert.match(refusedBy('promote', 'L-2'), /only Gru can promote/);
+  assert.match(refusedBy('promote', 'L-2'), /only Guru can promote/);
   setState({ panes: state().panes.filter((p) => p.pane_id !== 'w9:p1'), current: null });
 
   const log = teamFile('LOG.md');
@@ -269,7 +269,7 @@ test('team promote adds a lesson to the global list, and only Gru can', () => {
   // The first promote creates the list. L-2 never matches L-21.
   assert.equal(promoted(), '- Rule 2. Why: PR #2. Promoted from my-app L-2.\n');
   assert.equal(teamFile('LESSONS.md'), before);
-  assert.match(teamFile('LOG.md').slice(log.length), /^[\d-]+ [\d:]+ gru promoted L-2 to \S+: Rule 2\. Why: PR #2\.\n$/);
+  assert.match(teamFile('LOG.md').slice(log.length), /^[\d-]+ [\d:]+ guru promoted L-2 to \S+: Rule 2\. Why: PR #2\.\n$/);
 });
 
 test('team promote refuses a promoted rule, a missing or bad lesson, a full list, and a list it cannot write', () => {
@@ -367,7 +367,7 @@ test('team-up qa starts the pair and qa, and team-up product adds product to the
   assert.equal(run(TEAM_UP, ['product'], app).code, 0);
   assert.deepEqual(panes().map((p) => p.label), ['builder-minion', 'reviewer-minion', 'qa-minion', 'product-minion']);
   assert.match(prompts(paneIn('product-minion'))[0], /goal check/);
-  assert.match(prompts(paneIn('builder-minion')).at(-1), /^Gru added product-minion to the team\. Its job: Owns the product/);
+  assert.match(prompts(paneIn('builder-minion')).at(-1), /^Guru added product-minion to the team\. Its job: Owns the product/);
   assert.equal(prompts(paneIn('builder-minion')).length, 2);
   assert.match(run(TEAM_UP, ['security'], app).err, /there is no minion named security\. The minions: builder, reviewer, product, qa\./);
   assert.equal(run(TEAM, ['down'], app).code, 0);

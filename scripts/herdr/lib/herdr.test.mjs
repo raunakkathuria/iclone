@@ -74,10 +74,10 @@ test('planLayout picks the builder and reviewer panes', () => {
   assert.equal(planLayout([b, labelled], 'w1:p9').builder, labelled);
   assert.equal(planLayout([a, b, labelled], 'w1:p1').builder, labelled);
   assert.equal(planLayout([a, b], 'w1:p1').builder, a);
-  // Gru's seats never become a minion, even when they ask for a review.
-  const gru = shell('w1:p8', { label: 'gru', focused: true });
-  assert.equal(planLayout([gru, b], 'w1:p8').builder, b);
-  assert.equal(planLayout([gru, shell('w1:p9', { label: 'log' })]).builder, null);
+  // Guru's seats never become a minion, even when they ask for a review.
+  const guru = shell('w1:p8', { label: 'guru', focused: true });
+  assert.equal(planLayout([guru, b], 'w1:p8').builder, b);
+  assert.equal(planLayout([guru, shell('w1:p9', { label: 'log' })]).builder, null);
   // The new reviewer label beats an old one.
   const minion = shell('w1:p7', { label: 'reviewer-minion' });
   assert.equal(planLayout([a, r, minion]).reviewer, minion);

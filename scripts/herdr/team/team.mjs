@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// team: how the minions and Gru talk to each other. Run it anywhere inside a project that has a
+// team: how the minions and Guru talk to each other. Run it anywhere inside a project that has a
 // .team/ folder (team-up makes it). The commands are in USAGE below.
 //
 // Files are the record: every message goes to .team/LOG.md, escalations to ESCALATIONS.md,
@@ -14,14 +14,14 @@ import { PROMOTED, addLesson, addPromoted, findLesson, lessonBody, oneWhy, takeW
 
 const USAGE = `Usage:
   team say <minion> <message>                       message a minion, by name: builder, qa, ...
-  team escalate <topic>                             ask Gru for a decision
-  team decide <E-n> <decision> [--revisit <when>]   Gru answers an escalation
+  team escalate <topic>                             ask Guru for a decision
+  team decide <E-n> <decision> [--revisit <when>]   Guru answers an escalation
   team learn <rule> --from <source>                 add a lesson to .team/LESSONS.md
   team learn <W-n>                                  move a Watching line up to the lessons
-  team promote <L-n>                                Gru gives a lesson to every new project
+  team promote <L-n>                                Guru gives a lesson to every new project
   team status                                       the board, open escalations, latest decisions
-  team watch                                        Gru's view: does Gru need to act? Every 10 seconds
-  team down                                         Gru closes the team workspace`;
+  team watch                                        Guru's view: does Guru need to act? Every 10 seconds
+  team down                                         Guru closes the team workspace`;
 
 const [command, ...args] = process.argv.slice(2);
 if (!['say', 'escalate', 'decide', 'learn', 'promote', 'status', 'watch', 'down'].includes(command)) {
@@ -45,7 +45,7 @@ function projectRoot(dir = process.cwd()) {
 const root = projectRoot();
 const file = (name) => join(root, '.team', name);
 const read = (name) => (existsSync(file(name)) ? readFileSync(file(name), 'utf8') : '');
-// Local time, as Gru reads it: "2026-10-19 21:16".
+// Local time, as Guru reads it: "2026-10-19 21:16".
 const now = () => {
   const d = new Date();
   return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16).replace('T', ' ');
@@ -59,10 +59,10 @@ function currentPane() {
   try { return herdr('pane', 'current', '--current').pane; } catch { return null; }
 }
 
-// Who is calling: the minion whose pane in the team's workspace runs this command, or Gru from
+// Who is calling: the minion whose pane in the team's workspace runs this command, or Guru from
 // anywhere else.
 function caller(ws, pane) {
-  return ws && pane?.workspace_id === ws.workspace_id && roleOf(pane.label) ? roleOf(pane.label) : 'gru';
+  return ws && pane?.workspace_id === ws.workspace_id && roleOf(pane.label) ? roleOf(pane.label) : 'guru';
 }
 const nameOf = (role) => MINIONS[role] ?? role;
 
@@ -70,11 +70,11 @@ const nameOf = (role) => MINIONS[role] ?? role;
 // such as a second "## E-n ... OPEN" heading.
 const oneLine = (text) => !/[\r\n]/.test(text) && text.trim();
 
-// Gru's commands refuse a minion pane in any workspace, and a Herdr pane that cannot be looked
-// up: a minion with a broken herdr must not pass as Gru.
+// Guru's commands refuse a minion pane in any workspace, and a Herdr pane that cannot be looked
+// up: a minion with a broken herdr must not pass as Guru.
 function gruOnly(what) {
   if (roleOf(here?.label) || (!here && process.env.HERDR_PANE_ID)) {
-    fail(`only Gru can ${what}. Run it outside the minion panes, for example in the gru pane.`);
+    fail(`only Guru can ${what}. Run it outside the minion panes, for example in the guru pane.`);
   }
 }
 
@@ -95,11 +95,11 @@ if (command === 'say') {
   const pane = minionPanes(ws).find((p) => roleOf(p.label) === role);
   if (!pane) fail(`no ${MINIONS[role]} pane in workspace ${ws.workspace_id}.`);
   log(`${nameOf(me)} -> ${MINIONS[role]}: ${message}`);
-  const reply = me === 'gru' ? '' : ` (to reply: team say ${me} "...")`;
+  const reply = me === 'guru' ? '' : ` (to reply: team say ${me} "...")`;
   try {
     herdr('agent', 'prompt', pane.pane_id, `[from ${nameOf(me)}] ${roleNote(role, pane.agent, promptFile(root, role))}${message}${reply}`);
   } catch (e) {
-    if (e.code === 'agent_blocked') fail(`${MINIONS[role]} is waiting at a question in its pane. Gru must answer it first. The message is in .team/LOG.md.`);
+    if (e.code === 'agent_blocked') fail(`${MINIONS[role]} is waiting at a question in its pane. Guru must answer it first. The message is in .team/LOG.md.`);
     throw e;
   }
   console.log(`sent to ${MINIONS[role]}`);
@@ -114,8 +114,8 @@ if (command === 'say') {
     writeFileSync(join(root, details), `# ${id}: ${topic}\n\n## Option A\n\n## Option B\n\n## Best argument for each\n\n## Recommendation\n\n## Cost of waiting\n`);
   }
   log(`${nameOf(me)} escalated ${id}: ${topic}`);
-  notify('Gru, a decision is needed', `${basename(root)} ${id}: ${topic}`);
-  console.log(`${id}. Fill in ${details}, then wait for Gru's decision.`);
+  notify('Guru, a decision is needed', `${basename(root)} ${id}: ${topic}`);
+  console.log(`${id}. Fill in ${details}, then wait for Guru's decision.`);
 } else if (command === 'decide') {
   // The words after the ID are the decision, up to --revisit; the words after it say when to
   // revisit. No quotes are needed, and no word is dropped.
@@ -131,15 +131,15 @@ if (command === 'say') {
   const line = text.split('\n').findIndex((l) => l.startsWith(open) && l.endsWith(' OPEN'));
   if (line < 0) fail(`${id} is not an open escalation.`);
   const did = nextId(read('DECISIONS.md'), 'D');
-  appendFileSync(file('DECISIONS.md'), `\n## ${did} (${now()}, Gru, resolves ${id})\nDecision: ${decision}\nRevisit if: ${revisit}\n`);
+  appendFileSync(file('DECISIONS.md'), `\n## ${did} (${now()}, Guru, resolves ${id})\nDecision: ${decision}\nRevisit if: ${revisit}\n`);
   const lines = text.split('\n');
   lines[line] = `${lines[line].slice(0, -' OPEN'.length)} CLOSED by ${did}`;
   writeFileSync(file('ESCALATIONS.md'), lines.join('\n'));
-  log(`gru decided ${did} (resolves ${id}): ${decision}`);
+  log(`guru decided ${did} (resolves ${id}): ${decision}`);
   if (!ws) console.log('The team is not running, so no minion was told.');
   for (const pane of ws ? minionPanes(ws).filter((p) => p.agent) : []) {
     try {
-      herdr('agent', 'prompt', pane.pane_id, `Gru decided ${did} (resolves ${id}): ${decision}. It is in .team/DECISIONS.md. Commit to it and continue.`);
+      herdr('agent', 'prompt', pane.pane_id, `Guru decided ${did} (resolves ${id}): ${decision}. It is in .team/DECISIONS.md. Commit to it and continue.`);
     } catch (e) { console.error(`team: could not tell ${pane.label}: ${e.code}`); }
   }
   console.log(did);

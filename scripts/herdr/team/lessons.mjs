@@ -12,7 +12,7 @@ export const LIMIT = 15;
 const LESSON = /^L-(\d+)\b/;
 const FULL = `has ${LIMIT} lessons, the most it can hold. Merge two lessons or drop one, then try again.`;
 
-// The global list lives in Gru's iclone checkout. Installed, this folder's promoted-lessons.md is
+// The global list lives in Guru's iclone checkout. Installed, this folder's promoted-lessons.md is
 // a link to it (D-1), so team promote and team-up reach the checkout. Tests set the variable.
 export const PROMOTED = process.env.HERDR_PROMOTED_LESSONS || join(dirname(fileURLToPath(import.meta.url)), 'promoted-lessons.md');
 

@@ -554,7 +554,7 @@ async function prepare(tool, event, key, title) {
   const builderTool = builder.agent ?? tool;
   process.env.HERDR_PANE_ID = builder.pane_id;
   process.env.HERDR_WORKSPACE_ID = builder.workspace_id;
-  // Only the builder's work gets a review. A pane with no role counts as the builder; Gru's
+  // Only the builder's work gets a review. A pane with no role counts as the builder; Guru's
   // seats do not.
   const role = roleOf(builder.label) ?? (SEATS.has(builder.label) ? builder.label : null);
   if (role && role !== 'builder') {

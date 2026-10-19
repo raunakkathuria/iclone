@@ -21,9 +21,9 @@ const MINUTE = 60_000;
 const MINION_FILES = loadMinions();
 export const MINIONS = Object.fromEntries(Object.keys(MINION_FILES).map((name) => [name, `${name}-minion`]));
 
-// Panes for Gru, not for a minion: "gru" runs team watch, "log" shows the record. A seat never
+// Panes for Guru, not for a minion: "guru" runs team watch, "log" shows the record. A seat never
 // becomes a minion, and work started there gets no review.
-export const SEATS = new Set(['gru', 'log']);
+export const SEATS = new Set(['guru', 'log']);
 
 // The label of a project's team workspace, and whether a workspace label is one.
 export const teamLabel = (dir) => `${basename(dir)} minions`;

@@ -1,11 +1,11 @@
 # The minion team
 
-One command starts a team of minions in a Herdr workspace for a project. You are Gru: you write the
+One command starts a team of minions in a Herdr workspace for a project. You are Guru: you write the
 goal, and you decide when the minions cannot agree.
 
 | Minion | Tool and model | Job |
 |---|---|---|
-| **Gru** (you) | your shell | Write `.team/GOAL.md`. Answer escalations. |
+| **Guru** (you) | your shell | Write `.team/GOAL.md`. Answer escalations. |
 | `builder-minion` | Claude, Opus, high effort | Builds. The only minion that edits source code. |
 | `reviewer-minion` | Codex | The principal engineer: architecture, review, security, lessons. |
 | `product-minion` | Claude, Sonnet, medium effort | The goal check, the board, acceptance criteria, user experience. |
@@ -33,21 +33,21 @@ running team, name it: `team-up product`. The minions already at work are told w
 A new tool may ask "Do you trust this folder?" first. `team-up` tells you which pane asks, and
 waits until you answer there.
 
-## Gru's seats
+## Guru's seats
 
 `team-up` gives you two seats in the team workspace:
 
-- **The `gru` pane**, under the minions, runs `team watch`. Its first line answers "do I need to
-  act?": a green "Nothing needs you", or a red "Gru, a decision is needed" with each open
+- **The `guru` pane**, under the minions, runs `team watch`. Its first line answers "do I need to
+  act?": a green "Nothing needs you", or a red "Guru, a decision is needed" with each open
   escalation. Then come the task statuses and the last message. A yellow line warns you when
   every minion has been idle for 5 minutes while a task is not done.
 - **The `log` tab** shows every message between the minions, as it happens.
 
-When a minion escalates, Herdr also shows the notice "Gru, a decision is needed".
+When a minion escalates, Herdr also shows the notice "Guru, a decision is needed".
 
-## Gru's commands
+## Guru's commands
 
-Run them in the `gru` pane (press Ctrl-C to stop `team watch`, and the up arrow to start it again),
+Run them in the `guru` pane (press Ctrl-C to stop `team watch`, and the up arrow to start it again),
 or in any terminal in the project:
 
 ```bash
@@ -133,8 +133,8 @@ what the team does when the minion is not in it. All the rules every minion foll
 
 | File | Who writes it |
 |---|---|
-| `GOAL.md` | Gru |
-| `team.json` | `team-up`, and Gru: the team's minions and their settings |
+| `GOAL.md` | Guru |
+| `team.json` | `team-up`, and Guru: the team's minions and their settings |
 | `BOARD.md` | product-minion, or builder-minion when the team has none |
 | `ESCALATIONS.md` | `team escalate` and `team decide` |
 | `DECISIONS.md` | `team decide`, and the default owners for their own calls |

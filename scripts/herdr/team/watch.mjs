@@ -1,4 +1,4 @@
-// What `team watch` shows Gru: whether Gru needs to act, where the tasks stand, and the last
+// What `team watch` shows Guru: whether Guru needs to act, where the tasks stand, and the last
 // message. Pure functions on the files' text; team.mjs reads the files and the panes and draws it.
 
 const COLORS = { red: 31, green: 32, yellow: 33 };
@@ -32,12 +32,12 @@ export function wrap(text, width) {
 }
 
 // The view, as at most rows lines of at most width characters. The first line answers "does
-// Gru need to act?". idleMinutes is how long every minion has been idle; null when the team is
+// Guru need to act?". idleMinutes is how long every minion has been idle; null when the team is
 // not running.
 export function render({ escalations, tasks, lastLog, idleMinutes, time, width, rows }) {
   const open = tasks.filter(([, status]) => status !== 'DONE').map(([id]) => id);
   const entries = escalations.length
-    ? [['red', 'Gru, a decision is needed:'], ...escalations.map((e) => [null, e]), [null, 'Answer: team decide E-n <decision> --revisit <when>']]
+    ? [['red', 'Guru, a decision is needed:'], ...escalations.map((e) => [null, e]), [null, 'Answer: team decide E-n <decision> --revisit <when>']]
     : [['green', `Nothing needs you. ${time}`]];
   if (idleMinutes === null) entries.push(['yellow', 'The team is not running. Start it with team-up.']);
   else if (idleMinutes >= 5 && open.length) {

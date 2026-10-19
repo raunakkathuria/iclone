@@ -4,7 +4,7 @@ Every [Herdr](https://herdr.dev) workspace gets two panes: **builder-minion**, t
 **reviewer-minion**. When the builder finishes, its work goes to the reviewer, and the findings
 come back to the builder. You do nothing by hand.
 
-For bigger work, `team-up` starts a team of four minions in one workspace, with you as Gru, the
+For bigger work, `team-up` starts a team of four minions in one workspace, with you as Guru, the
 boss. See [team/README.md](team/README.md).
 
 ![Claude builds, Codex reviews, Claude fixes and replies](review-loop.gif)

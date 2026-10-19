@@ -104,7 +104,7 @@ it on. (A scheduler like OpenClaw's can do the same job if you'd rather not use 
 `builder-minion` that codes and a `reviewer-minion`, each running a coding agent: Claude Code, Codex,
 Cursor or Kiro. When the builder opens a pull request, or finishes local work, the reviewer reviews
 it. The builder then fixes the findings. For bigger work, `team-up` adds a product minion and a QA
-minion, with you as Gru, the boss.
+minion, with you as Guru, the boss.
 
 ```bash
 ./scripts/herdr/install.sh

@@ -10,7 +10,7 @@ const view = (change) => plain(render({
 }));
 
 test('openEscalations and boardTasks read the record files', () => {
-  const escalations = '# ESCALATIONS\n\n## E-1 (x, raised by gru) CLOSED by D-1\nTopic: old\n\n## E-2 (x, raised by qa-minion) OPEN\nTopic: REST or GraphQL\n';
+  const escalations = '# ESCALATIONS\n\n## E-1 (x, raised by guru) CLOSED by D-1\nTopic: old\n\n## E-2 (x, raised by qa-minion) OPEN\nTopic: REST or GraphQL\n';
   assert.deepEqual(openEscalations(escalations), ['E-2: REST or GraphQL']);
   const board = '| ID | Task | Owner | Status | Criteria |\n|----|---|---|---|---|\n| T-1 | learn | builder-minion | DONE | x |\n| T-2 | promote | builder-minion | QA | y |\n';
   assert.deepEqual(boardTasks(board), [['T-1', 'DONE'], ['T-2', 'QA']]);
@@ -21,10 +21,10 @@ test('wrap breaks at spaces, and cuts a word longer than the line', () => {
   assert.deepEqual(wrap('abcdefghij', 4), ['abcd', 'efgh', 'ij']);
 });
 
-test('the first line says whether Gru needs to act', () => {
+test('the first line says whether Guru needs to act', () => {
   assert.deepEqual(view({}), ['Nothing needs you. 21:16', 'T-1 DONE  T-2 DOING', '13:12 qa-minion -> builder-minion: T-1 PASS']);
   const asked = view({ escalations: ['E-2: REST or GraphQL'] });
-  assert.deepEqual(asked.slice(0, 3), ['Gru, a decision is needed:', 'E-2: REST or GraphQL', 'Answer: team decide E-n <decision> --revisit <when>']);
+  assert.deepEqual(asked.slice(0, 3), ['Guru, a decision is needed:', 'E-2: REST or GraphQL', 'Answer: team decide E-n <decision> --revisit <when>']);
   assert.match(render({ escalations: ['E-2: x'], tasks: [], lastLog: '', idleMinutes: 0, time: '', width: 60, rows: 6 })[0], /^\x1b\[1;31m/);
 });
 

@@ -1,4 +1,4 @@
-# GOAL (Gru writes this)
+# GOAL (Guru writes this)
 
 **Outcome:** <one sentence: what is true when this is done>
 **Target user:** <who>

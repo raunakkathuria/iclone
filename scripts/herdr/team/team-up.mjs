@@ -7,13 +7,13 @@
 //
 // 1. Creates .team/ from the templates. It never overwrites a file that is there. A new
 //    LESSONS.md also gets every lesson in the global list, from team promote.
-// 2. Writes the team's minions to .team/team.json. Gru can set each one's tool, model and effort
+// 2. Writes the team's minions to .team/team.json. Guru can set each one's tool, model and effort
 //    there too. The builder and the reviewer are always in.
-// 3. Stops while .team/GOAL.md is still the template: Gru writes the goal first.
+// 3. Stops while .team/GOAL.md is still the template: Guru writes the goal first.
 // 4. Opens a workspace named "<project> minions". The layout code (ensureLayout in
 //    lib/herdr.mjs, also run by the Herdr plugin) fills it with the minions, each with its role.
 // 5. Sends each new minion its first prompt: the "start" line in its file.
-// 6. Gives Gru two seats, when they are missing: a "gru" pane under the minions that runs
+// 6. Gives Guru two seats, when they are missing: a "guru" pane under the minions that runs
 //    team watch, and a "log" tab that shows every message.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -38,7 +38,7 @@ function newLessons() {
   return bodies.reduce((text, body) => addLesson(text, body).text, readFileSync(join(TEMPLATES, 'LESSONS.md'), 'utf8'));
 }
 
-// Creates what is missing in .team/. Returns true when GOAL.md still needs Gru.
+// Creates what is missing in .team/. Returns true when GOAL.md still needs Guru.
 function scaffold(root) {
   const team = join(root, '.team');
   // Built before anything is written, so a bad global list leaves .team/ as it was.
@@ -92,16 +92,16 @@ async function runIn(pane, command) {
   herdr('pane', 'send-keys', pane, 'enter');
 }
 
-// Gru's seats: a small "gru" pane at the bottom of the right column, running team watch, and a
+// Guru's seats: a small "guru" pane at the bottom of the right column, running team watch, and a
 // "log" tab with every message. Adds the ones that are missing.
 async function seats(ws, root, panes, members) {
   const labels = herdr('pane', 'list', '--workspace', ws).panes.map((p) => p.label);
-  if (!labels.includes('gru')) {
+  if (!labels.includes('guru')) {
     // The right column: the reviewer, then every second minion after the pair.
     const right = members.filter((_, i) => i === 1 || (i > 1 && i % 2 === 1));
     const id = herdr('pane', 'split', '--pane', panes[right.at(-1)], '--direction', 'down', '--ratio', '0.6',
       '--cwd', root, '--no-focus').pane.pane_id;
-    herdr('pane', 'rename', id, 'gru');
+    herdr('pane', 'rename', id, 'guru');
     await runIn(id, 'team watch');
   }
   if (!labels.includes('log')) {
@@ -112,7 +112,7 @@ async function seats(ws, root, panes, members) {
 }
 
 // Sends a minion its first prompt. A new tool can wait at a question first, such as "Do you trust
-// this folder?"; then Gru answers it in the pane, and this waits.
+// this folder?"; then Guru answers it in the pane, and this waits.
 async function kickoff(root, pane, role) {
   const text = MINION_FILES[role].start ?? `Read ${promptFile(root, role)}, then wait for work.`;
   const { agent: kind, agent_status: status } = herdr('agent', 'get', pane).agent;
@@ -147,14 +147,14 @@ async function main() {
   for (const role of running ? members.filter((m) => !starting.includes(m)) : []) {
     for (const added of starting) {
       try {
-        herdr('agent', 'prompt', panes[role], `Gru added ${MINIONS[added]} to the team. Its job: ${MINION_FILES[added].job ?? 'see its role'}. From now on it does that work, as your rules say.`);
+        herdr('agent', 'prompt', panes[role], `Guru added ${MINIONS[added]} to the team. Its job: ${MINION_FILES[added].job ?? 'see its role'}. From now on it does that work, as your rules say.`);
       } catch (e) { console.error(`team-up: could not tell ${MINIONS[role]} about ${MINIONS[added]}: ${e.code}`); }
     }
   }
   herdr('workspace', 'focus', ws);
   console.log(running && !starting.length
     ? `The minions of ${teamLabel(root)} are already running, in workspace ${ws}.`
-    : `The minions are working. Gru's commands: team status, team decide, team down.`);
+    : `The minions are working. Guru's commands: team status, team decide, team down.`);
 }
 
 main().catch((e) => {
