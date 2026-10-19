@@ -8,13 +8,14 @@
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { MINIONS, herdr, notify, roleNote, roleOf, teamLabel } from '../lib/herdr.mjs';
-import { addLesson, lessonBody } from './lessons.mjs';
+import { addLesson, lessonBody, oneWhy, takeWatching } from './lessons.mjs';
 
 const USAGE = `Usage:
   team say <minion> <message>                 message builder, reviewer, product or qa
   team escalate <topic>                       ask Gru for a decision
   team decide <E-n> <decision> [revisit if]   Gru answers an escalation
   team learn <rule> --from <source>           add a lesson to .team/LESSONS.md
+  team learn <W-n>                            move a Watching line up to the lessons
   team status                                 the board, open escalations, latest decisions
   team down                                   close the team workspace`;
 
@@ -119,19 +120,26 @@ if (command === 'say') {
   }
   console.log(did);
 } else if (command === 'learn') {
-  // The rule and the source are one line each, so a lesson can never add a second line to the file.
+  // A new lesson from a rule and a source, or the W-n line that moves up from Watching.
   const [rule, flag, source] = args;
+  const watching = args.length === 1 && /^W-\d+$/.test(rule) ? rule : null;
+  // The rule and the source are one line each, so a lesson can never add a second line to the file.
   const oneLine = (text) => !/[\r\n]/.test(text) && text.trim();
-  if (args.length !== 3 || flag !== '--from' || !oneLine(rule) || !oneLine(source)) fail('usage: team learn <rule> --from <source>');
-  // "Why:" separates the rule from the source, so a lesson line has it exactly once.
-  if ([rule, source].some((t) => t.includes('Why:'))) fail('a rule or source cannot contain "Why:". It separates the two in the lesson line.');
+  if (!watching && (args.length !== 3 || flag !== '--from' || !oneLine(rule) || !oneLine(source))) {
+    fail('usage: team learn <rule> --from <source>, or team learn <W-n>');
+  }
+  let body = watching ? null : lessonBody(rule.trim(), source.trim());
+  if (body && !oneWhy(body)) fail('a rule or source cannot contain "Why:". It separates the two in the lesson line.');
   if (!existsSync(file('LESSONS.md'))) fail('there is no .team/LESSONS.md. Run team-up to create it.');
-  const body = lessonBody(rule.trim(), source.trim());
-  let added;
-  try { added = addLesson(read('LESSONS.md'), body); } catch (e) { fail(`.team/LESSONS.md ${e.message}`); }
-  writeFileSync(file('LESSONS.md'), added.text);
-  log(`${nameOf(me)} learned ${added.id}: ${body}`);
-  console.log(added.id);
+  let text = read('LESSONS.md');
+  let id;
+  try {
+    if (watching) ({ text, body } = takeWatching(text, watching));
+    ({ text, id } = addLesson(text, body));
+  } catch (e) { fail(`.team/LESSONS.md ${e.message}`); }
+  writeFileSync(file('LESSONS.md'), text);
+  log(`${nameOf(me)} learned ${id}${watching ? ` from ${watching}` : ''}: ${body}`);
+  console.log(id);
 } else if (command === 'status') {
   console.log(read('BOARD.md').trim());
   const open = read('ESCALATIONS.md').split('\n').filter((l) => /^## E-\d+ .* OPEN$/.test(l));

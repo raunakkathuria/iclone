@@ -174,6 +174,29 @@ test('team learn refuses bad input, and a file with no Lessons heading', () => {
   setLessons(TEMPLATE_LESSONS);
 });
 
+test('team learn W-n moves that line from Watching to the end of Lessons', () => {
+  const before = lessonsFile([1, 4], ['W-12 r. Why: s.', 'W-1 a. Why: b.', 'W-2 c. Why: d.']);
+  setLessons(before);
+  const log = teamFile('LOG.md');
+  const { code, out } = run(TEAM, ['learn', 'W-1']);
+  assert.equal(code, 0);
+  assert.equal(out.trim(), 'L-5');
+  // Only W-1 moves, not W-12.
+  assert.equal(teamFile('LESSONS.md'), before.replace('PR #4.\n', 'PR #4.\nL-5 a. Why: b.\n').replace('W-1 a. Why: b.\n', ''));
+  assert.match(teamFile('LOG.md').slice(log.length), /^[\d-]+ [\d:]+ gru learned L-5 from W-1: a\. Why: b\.\n$/);
+});
+
+test('team learn W-n refuses a full list, a missing W-n, and a line without one "Why:"', () => {
+  setLessons(lessonsFile(range(15), ['W-1 a. Why: b.']));
+  assert.match(refused('W-1'), /has 15 lessons.*Merge two lessons or drop one/);
+  setLessons(lessonsFile([1], ['W-1 a. Why: b.', 'W-2 no reason.', 'W-3 a. Why: b. Why: c.']));
+  assert.match(refused('W-9'), /has no W-9 under "## Watching"/);
+  for (const id of ['W-2', 'W-3']) assert.match(refused(id), new RegExp(`has ${id}, which must have exactly one "Why:"`));
+  setLessons('# LESSONS\n\n## Lessons\n');
+  assert.match(refused('W-1'), /has no W-1 under "## Watching"/);
+  setLessons(TEMPLATE_LESSONS);
+});
+
 test('team down closes the team workspace', () => {
   assert.equal(run(TEAM, ['down']).code, 0);
   assert.deepEqual(state().workspaces, []);

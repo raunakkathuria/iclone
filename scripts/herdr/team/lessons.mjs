@@ -2,7 +2,8 @@
 // adds a lesson with them, and the callers read and write the files.
 //
 // A lesson is a line "L-n <rule>. Why: <source>." between the "## Lessons" and "## Watching"
-// headings. With no Watching heading, the section ends at the end of the file.
+// headings. With no Watching heading, the section ends at the end of the file. A line seen once
+// waits under Watching as "W-n <rule>. Why: <source>.", written by hand.
 
 export const LIMIT = 15;
 const LESSON = /^L-(\d+)\b/;
@@ -10,6 +11,23 @@ const LESSON = /^L-(\d+)\b/;
 // The text after the ID: "<rule>. Why: <source>.", with no second "." when one is there.
 const sentence = (text) => (text.endsWith('.') ? text : `${text}.`);
 export const lessonBody = (rule, source) => `${sentence(rule)} Why: ${sentence(source)}`;
+
+// "Why:" separates the rule from the source, so the text after an ID must have it exactly once.
+export const oneWhy = (body) => body.split('Why:').length === 2;
+
+// Takes the line "<id> <body>" out of the Watching section, which ends at the next "## " heading.
+// Returns the new text and the body. Throws when there is no such line, or its body breaks oneWhy.
+export function takeWatching(text, id) {
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => l.startsWith('## Watching'));
+  const next = lines.findIndex((l, i) => i > start && l.startsWith('## '));
+  const at = start < 0 ? -1 : lines.findIndex((l, i) => i > start && (next < 0 || i < next) && l.startsWith(`${id} `));
+  if (at < 0) throw new Error(`has no ${id} under "## Watching".`);
+  const body = lines[at].slice(id.length).trim();
+  if (!oneWhy(body)) throw new Error(`has ${id}, which must have exactly one "Why:". Fix that line by hand, then try again.`);
+  lines.splice(at, 1);
+  return { text: lines.join('\n'), body };
+}
 
 // Adds "L-<next> <body>" as the last line of the Lessons section. Returns the new text and the ID.
 // Throws when there is no Lessons heading, or when the section already has LIMIT lessons.
