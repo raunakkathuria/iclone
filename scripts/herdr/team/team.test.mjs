@@ -45,7 +45,7 @@ test('team-up first creates .team/ and asks Gru for the goal', () => {
   assert.equal(code, 0);
   assert.match(out, /Write the goal in \.team\/GOAL\.md/);
   for (const name of ['GOAL.md', 'BOARD.md', 'DECISIONS.md', 'ESCALATIONS.md', 'LESSONS.md']) assert.ok(teamFile(name));
-  assert.equal(teamFile('.gitignore'), 'LOG.md\n');
+  assert.equal(teamFile('.gitignore'), 'LOG.md\nprompts/\n');
   // No minion starts before there is a goal.
   assert.deepEqual(state().calls, []);
 });
@@ -301,28 +301,28 @@ test('team-up gives a new project every promoted lesson, and leaves an existing 
   const lessonsIn = (d) => readFileSync(join(d, '.team', 'LESSONS.md'), 'utf8');
   // With no global list, or a link to a deleted checkout, a new project gets the plain template.
   const plain = folder('plain-app');
-  assert.equal(run(TEAM_UP, [plain]).code, 0);
+  assert.equal(run(TEAM_UP, [], plain).code, 0);
   assert.equal(lessonsIn(plain), TEMPLATE_LESSONS);
   symlinkSync(join(dir, 'deleted-checkout', 'promoted-lessons.md'), PROMOTED);
   const broken = folder('broken-app');
-  assert.equal(run(TEAM_UP, [broken]).code, 0);
+  assert.equal(run(TEAM_UP, [], broken).code, 0);
   assert.equal(lessonsIn(broken), TEMPLATE_LESSONS);
   unlinkSync(PROMOTED);
 
   writeFileSync(PROMOTED, '# Promoted lessons\n\n- r5. Why: s5. Promoted from app-a L-5.\n- r3. Why: s3. Promoted from app-a L-3.\n');
   const b = folder('app-b');
-  assert.equal(run(TEAM_UP, [b]).code, 0);
+  assert.equal(run(TEAM_UP, [], b).code, 0);
   assert.equal(lessonsIn(b), TEMPLATE_LESSONS.replace('## Lessons\n', () => '## Lessons\n\nL-1 r5. Why: s5. Promoted from app-a L-5.\nL-2 r3. Why: s3. Promoted from app-a L-3.\n'));
   const c = folder('app-c');
   mkdirSync(join(c, '.team'));
   writeFileSync(join(c, '.team', 'LESSONS.md'), 'Our own lessons.\n');
-  assert.equal(run(TEAM_UP, [c]).code, 0);
+  assert.equal(run(TEAM_UP, [], c).code, 0);
   assert.equal(lessonsIn(c), 'Our own lessons.\n');
 
   // A hand-edited list with more than 15 lessons stops team-up before it writes anything.
   writeFileSync(PROMOTED, range(16).map((n) => `- r${n}. Why: s. Promoted from a L-${n}.\n`).join(''));
   const d = folder('app-d');
-  const full = run(TEAM_UP, [d]);
+  const full = run(TEAM_UP, [], d);
   assert.equal(full.code, 1);
   assert.match(full.err, /has 16 lessons, more than 15\. Merge two lessons or drop one/);
   assert.equal(existsSync(join(d, '.team')), false);
@@ -333,6 +333,31 @@ test('team down closes the team workspace', () => {
   assert.equal(run(TEAM, ['down']).code, 0);
   assert.deepEqual(state().workspaces, []);
   assert.match(run(TEAM, ['say', 'qa', 'hi']).err, /not running/);
+});
+
+test('team-up qa starts the pair and qa, and team-up product adds product to the running team', () => {
+  const app = join(dir, 'small-app');
+  mkdirSync(app);
+  assert.match(run(TEAM_UP, ['qa'], app).out, /for builder-minion, reviewer-minion, qa-minion\./);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(app, '.team', 'team.json'), 'utf8')).minions), ['builder', 'reviewer', 'qa']);
+  writeFileSync(join(app, '.team', 'GOAL.md'), '# GOAL\nSmall.\n');
+  assert.equal(run(TEAM_UP, [], app).code, 0);
+  const ws = state().workspaces.find((w) => w.label === 'small-app minions').workspace_id;
+  const panes = () => state().panes.filter((p) => p.workspace_id === ws);
+  const paneIn = (label) => panes().find((p) => p.label === label).pane_id;
+  assert.deepEqual(panes().map((p) => p.label), ['builder-minion', 'reviewer-minion', 'qa-minion']);
+  // The builder's first prompt covers a team with no product-minion, and every prompt is saved.
+  assert.match(prompts(paneIn('builder-minion'))[0], /If not, write the board yourself/);
+  assert.match(readFileSync(join(app, '.team', 'prompts', 'qa.md'), 'utf8'), /This team has no product-minion/);
+
+  // A minion added to the running team gets its first prompt; the others hear that it joined.
+  assert.equal(run(TEAM_UP, ['product'], app).code, 0);
+  assert.deepEqual(panes().map((p) => p.label), ['builder-minion', 'reviewer-minion', 'qa-minion', 'product-minion']);
+  assert.match(prompts(paneIn('product-minion'))[0], /goal check/);
+  assert.match(prompts(paneIn('builder-minion')).at(-1), /^Gru added product-minion to the team\. Its job: Owns the product/);
+  assert.equal(prompts(paneIn('builder-minion')).length, 2);
+  assert.match(run(TEAM_UP, ['security'], app).err, /there is no minion named security\. The minions: builder, reviewer, product, qa\./);
+  assert.equal(run(TEAM, ['down'], app).code, 0);
 });
 
 test('team needs a .team/ folder and a known command', () => {

@@ -1,28 +1,28 @@
 #!/usr/bin/env node
-// team-up [project folder]: starts the minion team for a project in Herdr.
+// team-up [minion...]: starts the minion team of the project in this folder, in Herdr.
+//
+//   team-up              the minions in .team/team.json; the first time: builder, reviewer, product, qa
+//   team-up qa           the first time: builder and reviewer, plus qa
+//   team-up security     on a running team: adds the security minion (team/minions/security.md)
 //
 // 1. Creates .team/ from the templates. It never overwrites a file that is there. A new
 //    LESSONS.md also gets every lesson in the global list, from team promote.
-// 2. Stops while .team/GOAL.md is still the template: Gru writes the goal first.
-// 3. Opens a workspace named "<project> minions". The layout code (ensureLayout in
-//    lib/herdr.mjs, also run by the Herdr plugin) fills it with four minions, each with its role.
-// 4. Sends the first prompts: product-minion and reviewer-minion check the goal, and the other
-//    two wait for work.
-// When the team is already running, it only shows the workspace again.
+// 2. Writes the team's minions to .team/team.json. Gru can set each one's tool, model and effort
+//    there too. The builder and the reviewer are always in.
+// 3. Stops while .team/GOAL.md is still the template: Gru writes the goal first.
+// 4. Opens a workspace named "<project> minions". The layout code (ensureLayout in
+//    lib/herdr.mjs, also run by the Herdr plugin) fills it with the minions, each with its role.
+// 5. Sends each new minion its first prompt: the "start" line in its file.
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MINIONS, ensureLayout, findTeam, herdr, roleNote, sendPrompt, sleep, teamLabel, waitReady } from '../lib/herdr.mjs';
+import { CORE, DEFAULT_EXTRAS, loadMinions, promptFile, readTeam, teamMembers } from '../lib/minions.mjs';
 import { LIMIT, PROMOTED, addLesson, promotedBodies } from './lessons.mjs';
 
 const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), 'templates');
-const KICKOFF = {
-  reviewer: 'Gru wrote the goal in .team/GOAL.md. Do your goal check now, as your role says.',
-  product: 'Gru wrote the goal in .team/GOAL.md. Do your goal check now, as your role says. When both checks are written, escalate or write the board.',
-  builder: 'Read .team/GOAL.md and .team/LESSONS.md. Then wait until product-minion says the board is ready.',
-  qa: 'Read .team/GOAL.md. Then wait for a handover from builder-minion.',
-};
+const MINION_FILES = loadMinions();
 
 function gitRoot(dir) {
   try { return execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; }
@@ -47,17 +47,37 @@ function scaffold(root) {
     if (name === 'LESSONS.md') writeFileSync(join(team, name), lessons);
     else copyFileSync(join(TEMPLATES, name), join(team, name));
   }
-  if (!existsSync(join(team, '.gitignore'))) writeFileSync(join(team, '.gitignore'), 'LOG.md\n');
+  // The log and the generated prompts are not part of the record git keeps.
+  const ignore = join(team, '.gitignore');
+  const ignored = existsSync(ignore) ? readFileSync(ignore, 'utf8').split('\n') : [];
+  const missing = ['LOG.md', 'prompts/'].filter((line) => !ignored.includes(line));
+  if (missing.length) appendFileSync(ignore, `${ignored.length && ignored.at(-1) !== '' ? '\n' : ''}${missing.join('\n')}\n`);
   return readFileSync(join(team, 'GOAL.md'), 'utf8') === readFileSync(join(TEMPLATES, 'GOAL.md'), 'utf8');
 }
 
-// Waits until every minion pane has a tool running. The plugin may be building the same
+// Writes the team's minions to .team/team.json: the ones already there, with their settings,
+// plus the names asked for. The first time, with no names, the pair plus the default minions.
+// Returns the minions that are new to the team.
+function chooseMinions(root, names) {
+  const team = readTeam(root);
+  const unknown = [...names, ...Object.keys(team?.minions ?? {})].filter((name) => !MINION_FILES[name]);
+  if (unknown.length) throw new Error(`there is no minion named ${unknown.join(', ')}. The minions: ${Object.keys(MINION_FILES).join(', ')}.`);
+  const before = team ? teamMembers(team) : [];
+  const minions = { ...(team?.minions ?? Object.fromEntries([...CORE, ...(names.length ? [] : DEFAULT_EXTRAS)].map((name) => [name, {}]))) };
+  for (const name of names) minions[name] ??= {};
+  if (!team || names.some((name) => !(name in team.minions))) {
+    writeFileSync(join(root, '.team', 'team.json'), `${JSON.stringify({ ...team, minions }, null, 2)}\n`);
+  }
+  return teamMembers({ minions }).filter((name) => !before.includes(name));
+}
+
+// Waits until every minion of the team has a tool running. The plugin may be building the same
 // workspace; ensureLayout then returns null, and this tries again.
-async function layout(ws) {
+async function layout(ws, members) {
   for (let i = 0; i < 60; i++) {
     const panes = await ensureLayout(ws);
     const running = new Set(herdr('pane', 'list', '--workspace', ws).panes.filter((p) => p.agent).map((p) => p.pane_id));
-    if (panes?.qa && Object.keys(MINIONS).every((role) => running.has(panes[role]))) return panes;
+    if (panes && members.every((role) => running.has(panes[role]))) return panes;
     await sleep(3000);
   }
   throw new Error(`the minions in workspace ${ws} did not all start. Look at the panes for a question to answer.`);
@@ -65,39 +85,47 @@ async function layout(ws) {
 
 // Sends a minion its first prompt. A new tool can wait at a question first, such as "Do you trust
 // this folder?"; then Gru answers it in the pane, and this waits.
-async function kickoff(pane, role, text) {
+async function kickoff(root, pane, role) {
+  const text = MINION_FILES[role].start ?? `Read ${promptFile(root, role)}, then wait for work.`;
   const { agent: kind, agent_status: status } = herdr('agent', 'get', pane).agent;
   if (status === 'blocked') console.log(`${MINIONS[role]} waits at a question in pane ${pane}. Answer it there.`);
   try {
-    return (await waitReady(pane, MINIONS[role], 30 * 60_000)) && (await sendPrompt(pane, roleNote(role, kind) + text));
+    if ((await waitReady(pane, MINIONS[role], 30 * 60_000)) && (await sendPrompt(pane, roleNote(role, kind, promptFile(root, role)) + text))) return;
   } catch (e) {
-    if (e.code === 'agent_blocked') return false;
-    throw e;
+    if (e.code !== 'agent_blocked') throw e;
   }
+  console.error(`team-up: ${MINIONS[role]} did not take its first prompt. Send it yourself: ${text}`);
 }
 
 async function main() {
-  const root = resolve(process.argv[2] ?? gitRoot(process.cwd()) ?? process.cwd());
-  if (scaffold(root)) {
-    console.log(`Created ${join(root, '.team')}. Write the goal in .team/GOAL.md, then run team-up again.`);
+  const names = process.argv.slice(2);
+  const root = gitRoot(process.cwd()) ?? process.cwd();
+  const needsGoal = scaffold(root);
+  const added = chooseMinions(root, names);
+  const members = teamMembers(readTeam(root));
+  if (needsGoal) {
+    console.log(`Created ${join(root, '.team')} for ${members.map((m) => MINIONS[m]).join(', ')}. Write the goal in .team/GOAL.md, then run team-up again.`);
     return;
   }
-  const label = teamLabel(root);
   const running = findTeam(root);
-  if (running) {
-    await layout(running.workspace_id);
-    herdr('workspace', 'focus', running.workspace_id);
-    console.log(`The minions of ${label} are already running, in workspace ${running.workspace_id}.`);
-    return;
-  }
-  const ws = herdr('workspace', 'create', '--cwd', root, '--label', label, '--no-focus').workspace.workspace_id;
-  console.log(`Starting the minions in workspace ${ws}. This takes about a minute.`);
-  const panes = await layout(ws);
-  for (const [role, text] of Object.entries(KICKOFF)) {
-    if (!(await kickoff(panes[role], role, text))) console.error(`team-up: ${MINIONS[role]} did not take its first prompt. Send it yourself: ${text}`);
+  const ws = running?.workspace_id ?? herdr('workspace', 'create', '--cwd', root, '--label', teamLabel(root), '--no-focus').workspace.workspace_id;
+  // A new team gets every first prompt; a running team only those of the minions it just gained.
+  const starting = running ? added : members;
+  if (starting.length) console.log(`Starting ${starting.map((m) => MINIONS[m]).join(', ')} in workspace ${ws}. This takes about a minute.`);
+  const panes = await layout(ws, members);
+  for (const role of starting) await kickoff(root, panes[role], role);
+  // The minions already at work started with the old team list, so they are told who joined.
+  for (const role of running ? members.filter((m) => !starting.includes(m)) : []) {
+    for (const added of starting) {
+      try {
+        herdr('agent', 'prompt', panes[role], `Gru added ${MINIONS[added]} to the team. Its job: ${MINION_FILES[added].job ?? 'see its role'}. From now on it does that work, as your rules say.`);
+      } catch (e) { console.error(`team-up: could not tell ${MINIONS[role]} about ${MINIONS[added]}: ${e.code}`); }
+    }
   }
   herdr('workspace', 'focus', ws);
-  console.log(`The minions are working. Gru's commands: team status, team decide, team down.`);
+  console.log(running && !starting.length
+    ? `The minions of ${teamLabel(root)} are already running, in workspace ${ws}.`
+    : `The minions are working. Gru's commands: team status, team decide, team down.`);
 }
 
 main().catch((e) => {

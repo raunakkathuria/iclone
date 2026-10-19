@@ -1,7 +1,7 @@
 // Run: node --test lib/herdr.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,11 +99,11 @@ test('splitDirection splits wide panes right and tall panes down', () => {
   assert.equal(splitDirection(undefined), 'down');
 });
 
-test('loadConfig reads config.json and falls back to claude and codex', () => {
+test('loadConfig reads config.json, and is empty without one', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pair-config-'));
   writeFileSync(join(dir, 'config.json'), '{"builder":"kiro"}');
-  assert.deepEqual(loadConfig(join(dir, 'config.json')), { builder: 'kiro', reviewer: 'codex', product: 'claude', qa: 'claude' });
-  assert.deepEqual(loadConfig(join(dir, 'missing.json')), { builder: 'claude', reviewer: 'codex', product: 'claude', qa: 'claude' });
+  assert.deepEqual(loadConfig(join(dir, 'config.json')), { builder: 'kiro' });
+  assert.deepEqual(loadConfig(join(dir, 'missing.json')), {});
   rmSync(dir, { recursive: true });
 });
 
@@ -168,22 +168,55 @@ test('a pane busy with another program gets no agent', async t => {
   assert.deepEqual(herdr.starts(), []);
 });
 
-test('a team workspace gets four minions in a 2x2 grid, each with its role', async t => {
-  const herdr = fakeHerdr(t, [shell('w1:p1')], 'ok', [{ workspace_id: 'w1', label: 'app minions' }]);
-  const team = { ...CONFIG, product: 'claude', qa: 'claude' };
-  assert.deepEqual(await ensureLayout('w1', team), { builder: 'w1:p1', reviewer: 'w1:p2', product: 'w1:p3', qa: 'w1:p4', started: ['builder', 'reviewer', 'product', 'qa'] });
+// A project folder with a .team/ folder and, when given, a .team/team.json.
+function project(t, team = null) {
+  const root = mkdtempSync(join(tmpdir(), 'pair-project-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, '.team'));
+  if (team) writeFileSync(join(root, '.team', 'team.json'), JSON.stringify(team));
+  return root;
+}
+
+test('a team workspace with no team.json gets four minions in a 2x2 grid, each with its role', async t => {
+  const root = project(t);
+  const herdr = fakeHerdr(t, [shell('w1:p1', { cwd: root })], 'ok', [{ workspace_id: 'w1', label: 'app minions' }]);
+  assert.deepEqual(await ensureLayout('w1', CONFIG), { builder: 'w1:p1', reviewer: 'w1:p2', product: 'w1:p3', qa: 'w1:p4', started: ['builder', 'reviewer', 'product', 'qa'] });
   assert.deepEqual(herdr.panes().map((p) => p.label), ['builder-minion', 'reviewer-minion', 'product-minion', 'qa-minion']);
   // Reviewer to the right of the builder; product below the builder; QA below the reviewer.
   const splits = herdr.calls().filter((a) => a[1] === 'split').map((a) => [a[a.indexOf('--pane') + 1], a[a.indexOf('--direction') + 1]]);
   assert.deepEqual(splits, [['w1:p1', 'right'], ['w1:p1', 'down'], ['w1:p2', 'down']]);
   assert.deepEqual(herdr.starts(), [['w1:p1', 'claude'], ['w1:p2', 'codex'], ['w1:p3', 'claude'], ['w1:p4', 'claude']]);
-  // Each minion starts with its own role.
-  assert.ok(herdr.argsOf('w1:p3').includes('--append-system-prompt-file'));
-  assert.match(readFileSync(herdr.argsOf('w1:p3')[1], 'utf8'), /product-minion: "the user's advocate"/);
+  // Each minion starts with its own role, saved in .team/prompts/, and its model and effort.
+  assert.deepEqual(herdr.argsOf('w1:p3').slice(0, 6), ['--append-system-prompt-file', join(root, '.team', 'prompts', 'product.md'), '--model', 'sonnet', '--effort', 'medium']);
+  assert.match(readFileSync(join(root, '.team', 'prompts', 'product.md'), 'utf8'), /product-minion: "the user's advocate"/);
   assert.match(herdr.argsOf('w1:p2').join(' '), /developer_instructions=.*reviewer-minion/);
   // Every pane has its label before the first tool starts.
   const calls = herdr.calls().map((a) => a.slice(0, 2).join(' '));
   assert.ok(calls.lastIndexOf('pane rename') < calls.indexOf('agent start'));
+});
+
+test('a team.json picks the minions, and its settings beat config.json', async t => {
+  const root = project(t, { minions: { builder: {}, reviewer: { tool: 'cursor' }, qa: { model: 'opus' } } });
+  const herdr = fakeHerdr(t, [shell('w1:p1', { cwd: root })], 'ok', [{ workspace_id: 'w1', label: 'app minions' }]);
+  assert.deepEqual(await ensureLayout('w1', { qa: { model: 'haiku', effort: 'low' } }),
+    { builder: 'w1:p1', reviewer: 'w1:p2', qa: 'w1:p3', started: ['builder', 'reviewer', 'qa'] });
+  // The first other minion goes under the builder.
+  const splits = herdr.calls().filter((a) => a[1] === 'split').map((a) => [a[a.indexOf('--pane') + 1], a[a.indexOf('--direction') + 1]]);
+  assert.deepEqual(splits, [['w1:p1', 'right'], ['w1:p1', 'down']]);
+  assert.deepEqual(herdr.starts(), [['w1:p1', 'claude'], ['w1:p2', 'cursor'], ['w1:p3', 'claude']]);
+  // team.json's model beats config.json's; config.json's effort fills what team.json leaves out.
+  assert.deepEqual(herdr.argsOf('w1:p3').slice(2, 6), ['--model', 'opus', '--effort', 'low']);
+  // QA's prompt lists only this team, and says what the team does without a product-minion.
+  const prompt = readFileSync(join(root, '.team', 'prompts', 'qa.md'), 'utf8');
+  assert.match(prompt, /## This team\n- \*\*builder-minion\*\*: .*\n- \*\*reviewer-minion\*\*: .*\n- \*\*qa-minion\*\*: /);
+  assert.match(prompt, /This team has no product-minion: builder-minion takes its tasks/);
+  assert.doesNotMatch(prompt, /This team has no qa-minion/);
+});
+
+test('a team workspace with no .team/ folder gets only the pair', async t => {
+  const herdr = fakeHerdr(t, [shell('w1:p1', { cwd: tmpdir() })], 'ok', [{ workspace_id: 'w1', label: 'app minions' }]);
+  assert.deepEqual(await ensureLayout('w1', CONFIG), { builder: 'w1:p1', reviewer: 'w1:p2', started: ['builder', 'reviewer'] });
+  assert.deepEqual(herdr.argsOf('w1:p1').slice(-2), ['--timeout', '60000']);
 });
 
 test('a pair workspace starts its tools without role arguments', async t => {
@@ -211,6 +244,9 @@ test('team labels and role arguments', () => {
   assert.ok(codex.every((a) => !a.includes('\n')));
   assert.deepEqual(roleArgs('qa', 'kiro', '/x/qa.md'), []);
   assert.deepEqual(roleArgs('reviewer', 'cursor', '/x/reviewer.md'), ['--trust']);
+  // Each tool gets the model and effort in its own way.
+  assert.deepEqual(roleArgs('reviewer', 'cursor', '/x/r.md', { model: 'gpt-5' }), ['--trust', '--model', 'gpt-5']);
+  assert.deepEqual(roleArgs('reviewer', 'codex', '/x/r.md', { model: 'o3', effort: 'high' }).slice(0, 4), ['-m', 'o3', '-c', 'model_reasoning_effort="high"']);
 });
 
 test('roleNote reminds a tool that cannot take its role at start', () => {

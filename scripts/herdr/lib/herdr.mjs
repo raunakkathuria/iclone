@@ -3,22 +3,23 @@
 //
 // Roles come from pane labels: the pane labelled "builder-minion" writes the code, the pane
 // labelled "reviewer-minion" reviews it. The tool in each pane is whatever Herdr detects there,
-// so you can switch tools at any time. A workspace whose label ends in " minions" is a team:
-// it also gets "product-minion" and "qa-minion", and each minion starts with its role prompt.
+// so you can switch tools at any time. A workspace whose label ends in " minions" is a team: it
+// also gets the other minions its project's .team/team.json names, and each minion starts with
+// its role prompt. The minions themselves are files in team/minions/ (see minions.mjs).
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join } from 'node:path';
+import { CORE, REPO_ROOT, loadMinions, projectOf, readTeam, settingsOf, teamMembers, writePrompt } from './minions.mjs';
 
+export { REPO_ROOT };
 export const STATE_DIR = process.env.PR_HANDOFF_STATE_DIR || join(homedir(), '.local/state/pr-review-handoff');
-export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // The command that starts a new conversation, so a reviewer never sees its earlier reviews.
 export const CLEAR_COMMAND = { claude: '/clear', codex: '/new', cursor: '/clear', kiro: '/clear' };
-const DEFAULT_CONFIG = { builder: 'claude', reviewer: 'codex', product: 'claude', qa: 'claude' };
 const MINUTE = 60_000;
-// The pane label of each role. A pair has the first two; a team has all four.
-export const MINIONS = { builder: 'builder-minion', reviewer: 'reviewer-minion', product: 'product-minion', qa: 'qa-minion' };
+// Every minion, from its file, and the pane label of each: "qa" is "qa-minion".
+const MINION_FILES = loadMinions();
+export const MINIONS = Object.fromEntries(Object.keys(MINION_FILES).map((name) => [name, `${name}-minion`]));
 
 // Panes for Gru, not for a minion: "gru" runs team watch, "log" shows the record. A seat never
 // becomes a minion, and work started there gets no review.
@@ -70,9 +71,10 @@ export function notify(title, body, sound = 'request') {
   try { herdr('notification', 'show', title, '--body', body, '--sound', sound); } catch (e) { log(e.message); }
 }
 
-// The default tools for new panes, from config.json at the repository root.
+// The settings for every project, from config.json at the repository root: they override the
+// minion files' defaults (see settingsOf in minions.mjs). Empty when there is no config.json.
 export function loadConfig(file = join(REPO_ROOT, 'config.json')) {
-  try { return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(file, 'utf8')) }; } catch { return { ...DEFAULT_CONFIG }; }
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return {}; }
 }
 
 // The role of a pane label: a key of MINIONS, or null. Old labels still count: "coder",
@@ -85,11 +87,12 @@ export function roleOf(label) {
   return null;
 }
 
-// The tool to start in an empty reviewer pane: PR_REVIEWER if set, else the configured reviewer,
-// unless the builder already uses that tool; then the configured builder tool.
-export function pickReviewer(builder, config = DEFAULT_CONFIG, env = {}) {
+// The tool to start in an empty reviewer pane: PR_REVIEWER if set, else the reviewer's tool,
+// unless the builder already uses that tool; then the builder's configured tool.
+// tools: { builder, reviewer }, the configured tool of each.
+export function pickReviewer(builder, tools, env = {}) {
   if (env.PR_REVIEWER) return env.PR_REVIEWER;
-  return config.reviewer !== builder ? config.reviewer : config.builder;
+  return tools.reviewer !== builder ? tools.reviewer : tools.builder;
 }
 
 // Split a wide pane to the right and a tall one down. Terminal cells are about twice as tall as wide.
@@ -120,7 +123,8 @@ export function planLayout(panes, builderId = null) {
     const found = panes.filter((p) => roleOf(p.label) === role);
     return found.find((p) => p.label === MINIONS[role]) ?? found[0] ?? null;
   };
-  return { builder, reviewer: byLabel('reviewer'), product: byLabel('product'), qa: byLabel('qa') };
+  const others = Object.keys(MINIONS).filter((role) => role !== 'builder');
+  return { builder, ...Object.fromEntries(others.map((role) => [role, byLabel(role)])) };
 }
 
 // Whether Herdr may start an agent in the pane: no agent now, none waiting to resume after a
@@ -137,16 +141,6 @@ function isFreeShell(pane) {
 // prompt would land on it. Agents started here skip that question.
 const AGENT_ARGS = { codex: ['-c', 'check_for_update_on_startup=false'] };
 
-// The role prompt of a team minion: the shared team rules plus the role's own file, from
-// team/roles/. Written to one file, because Claude takes one prompt file.
-export function rolePromptFile(role) {
-  const roles = join(REPO_ROOT, 'team', 'roles');
-  const file = join(STATE_DIR, 'minions', `${role}.md`);
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${readFileSync(join(roles, '_shared.md'), 'utf8')}\n${readFileSync(join(roles, `${role}.md`), 'utf8')}`);
-  return file;
-}
-
 // The minions share one project folder, so only the builder may change it through git: a
 // checkout by another minion would swap the builder's files under it.
 // "git -C <dir>" and "git -c <key>" start with an option, so they are denied too.
@@ -156,28 +150,30 @@ const GIT_WRITES = ['git checkout', 'git switch', 'git stash', 'git reset', 'git
 // The tools that take their role when they start. Any other tool gets roleNote with each message.
 const ROLE_AT_START = new Set(['claude', 'codex']);
 
-// The arguments that start a team minion with its role. The role stays through /clear and /new.
-// Claude reads the prompt file, may run `team` without asking, and, except for the builder, may
-// not change the folder through git. Codex gets a one-line pointer to the file (Herdr refuses
-// arguments with line breaks), and network access in its sandbox: without it, `team` cannot
-// reach the Herdr socket. Cursor trusts the folder at once, because Herdr sees its trust
-// question as idle and would type the first prompt into it.
-export function roleArgs(role, kind, file = rolePromptFile(role)) {
+// The arguments that start a team minion with its role (the prompt file), its model and its
+// effort. The role stays through /clear and /new. Claude reads the prompt file, may run `team`
+// without asking, and, except for the builder, may not change the folder through git. Codex gets
+// a one-line pointer to the file (Herdr refuses arguments with line breaks), and network access
+// in its sandbox: without it, `team` cannot reach the Herdr socket. Cursor trusts the folder at
+// once, because Herdr sees its trust question as idle and would type the first prompt into it.
+export function roleArgs(role, kind, file, { model, effort } = {}) {
   if (kind === 'claude') {
-    return ['--append-system-prompt-file', file, '--allowedTools', 'Bash(team:*)',
-      ...(role === 'builder' ? [] : ['--disallowedTools', ...GIT_WRITES])];
+    return ['--append-system-prompt-file', file, ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []),
+      '--allowedTools', 'Bash(team:*)', ...(role === 'builder' ? [] : ['--disallowedTools', ...GIT_WRITES])];
   }
   if (kind === 'codex') {
     const pointer = `You are ${MINIONS[role]}, one of the minions. Before every task and every review, read ${file} and follow it.`;
-    return ['-c', 'sandbox_mode="workspace-write"', '-c', 'sandbox_workspace_write.network_access=true',
+    return [...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []),
+      '-c', 'sandbox_mode="workspace-write"', '-c', 'sandbox_workspace_write.network_access=true',
       '-c', `developer_instructions=${JSON.stringify(pointer)}`];
   }
-  return kind === 'cursor' ? ['--trust'] : [];
+  if (kind === 'cursor') return ['--trust', ...(model ? ['--model', model] : [])];
+  return [];
 }
 
 // The start of each message to a minion whose tool cannot take its role at start: a reminder of
-// the role, which also works after /clear. Empty for Claude and Codex.
-export function roleNote(role, kind, file = rolePromptFile(role)) {
+// the role (the prompt file), which also works after /clear. Empty for Claude and Codex.
+export function roleNote(role, kind, file) {
   return ROLE_AT_START.has(kind) ? '' : `(You are ${MINIONS[role]}, one of the minions: first read ${file} and follow it.) `;
 }
 
@@ -266,26 +262,33 @@ export async function withLock(key, work, staleMs = 180 * MINUTE) {
   try { return await work(); } finally { release(); }
 }
 
-// Makes sure the workspace has its minions, each with a tool running: a builder and a reviewer,
-// and in a team workspace also a product and a QA minion, in a 2x2 grid. Safe to run many times:
-// it only adds what is missing and never touches a running agent. Returns the pane ID of each
-// role and, in started, the roles it started a tool for; or null when another run is doing the
-// work.
+// Makes sure the workspace has its minions, each with a tool running: the builder and the
+// reviewer side by side, and in a team workspace also the other minions that its project's
+// .team/team.json names, filling the two columns from the top. Safe to run many times: it only
+// adds what is missing and never touches a running agent. Returns the pane ID of each minion
+// and, in started, the minions it started a tool for; or null when another run is doing the work.
 export async function ensureLayout(workspace, config = loadConfig(), builderId = null) {
   const release = tryLock(`layout-${workspace.replace(/[^A-Za-z0-9_-]/g, '-')}`);
   if (!release) return null;
   try {
-    const team = isTeam(herdr('workspace', 'get', workspace).workspace?.label);
+    const label = herdr('workspace', 'get', workspace).workspace?.label;
     const panes = herdr('pane', 'list', '--workspace', workspace).panes;
     const found = planLayout(panes, builderId);
-    if (!found.builder) return { builder: null, reviewer: found.reviewer?.pane_id ?? null };
-    const roles = team ? ['builder', 'reviewer', 'product', 'qa'] : ['builder', 'reviewer'];
+    if (!found.builder) return { builder: null, reviewer: found.reviewer?.pane_id ?? null, started: [] };
+    const { builder } = found;
+    // A team needs its project: the folder at or above the builder's with a .team/ folder.
+    const root = isTeam(label) ? projectOf(builder.cwd ?? '') : null;
+    if (isTeam(label) && !root) log(`layout ${workspace}: no .team/ at or above ${builder.cwd}, so only the pair starts`);
+    const team = root ? readTeam(root) : null;
+    const named = root ? teamMembers(team) : CORE;
+    const unknown = named.filter((role) => !MINION_FILES[role]);
+    if (unknown.length) log(`layout ${workspace}: .team/team.json names ${unknown.join(', ')}, which has no minion file; left out`);
+    const members = named.filter((role) => MINION_FILES[role]);
     // Label before starting a tool: a tool's session hook reads the label when it starts.
-    for (const role of roles) {
+    for (const role of members) {
       const pane = found[role];
       if (pane && pane.label !== MINIONS[role]) herdr('pane', 'rename', pane.pane_id, MINIONS[role]);
     }
-    const { builder } = found;
     const cwd = builder.foreground_cwd || builder.cwd;
     const split = (from, direction, role) => {
       const id = herdr('pane', 'split', '--pane', from.pane_id, '--direction', direction,
@@ -296,23 +299,30 @@ export async function ensureLayout(workspace, config = loadConfig(), builderId =
     };
     if (!found.reviewer) {
       const rect = herdr('pane', 'layout', '--pane', builder.pane_id).layout.panes.find((p) => p.pane_id === builder.pane_id)?.rect;
-      found.reviewer = split(builder, team ? 'right' : splitDirection(rect), 'reviewer');
+      found.reviewer = split(builder, root ? 'right' : splitDirection(rect), 'reviewer');
     }
-    if (team) {
-      found.product ??= split(builder, 'down', 'product');
-      found.qa ??= split(found.reviewer, 'down', 'qa');
-    }
+    // The other minions fill the columns from the top: left under the builder, right under the reviewer.
+    const columns = [[builder], [found.reviewer]];
+    members.slice(CORE.length).forEach((role, i) => {
+      const column = columns[i % 2];
+      found[role] ??= split(column.at(-1), 'down', role);
+      column.push(found[role]);
+    });
+    const settings = Object.fromEntries(members.map((role) => [role, settingsOf(role, MINION_FILES, config, team)]));
     let builderTool = builder.agent ?? builder.agent_session?.agent;
     const started = [];
-    for (const role of roles) {
+    for (const role of members) {
       const pane = found[role];
       if (!isFreeShell(pane)) continue;
-      const tool = role === 'reviewer' ? pickReviewer(builderTool ?? config.builder, config, process.env) : config[role];
+      const tool = role === 'reviewer'
+        ? pickReviewer(builderTool ?? settings.builder.tool, { builder: settings.builder.tool, reviewer: settings.reviewer.tool }, process.env)
+        : settings[role].tool;
       if (role === 'builder') builderTool = tool;
-      await startAgent(pane.pane_id, role, tool, team ? roleArgs(role, tool) : []);
+      const args = root ? roleArgs(role, tool, writePrompt(root, role, MINION_FILES, members), settings[role]) : [];
+      await startAgent(pane.pane_id, role, tool, args);
       started.push(role);
       log(`layout ${workspace}: started ${tool} in ${role} ${pane.pane_id}`);
     }
-    return { ...Object.fromEntries(roles.map((role) => [role, found[role].pane_id])), started };
+    return { ...Object.fromEntries(members.map((role) => [role, found[role].pane_id])), started };
   } finally { release(); }
 }

@@ -8,10 +8,11 @@
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { MINIONS, findTeam, herdr, notify, roleNote, roleOf } from '../lib/herdr.mjs';
+import { promptFile } from '../lib/minions.mjs';
 import { PROMOTED, addLesson, addPromoted, findLesson, lessonBody, oneWhy, takeWatching } from './lessons.mjs';
 
 const USAGE = `Usage:
-  team say <minion> <message>                       message builder, reviewer, product or qa
+  team say <minion> <message>                       message a minion, by name: builder, qa, ...
   team escalate <topic>                             ask Gru for a decision
   team decide <E-n> <decision> [--revisit <when>]   Gru answers an escalation
   team learn <rule> --from <source>                 add a lesson to .team/LESSONS.md
@@ -85,7 +86,7 @@ const me = caller(ws, here);
 if (command === 'say') {
   const [to, ...words] = args;
   const role = roleOf(to) ?? roleOf(`${to}-minion`);
-  if (!role || !words.length) fail(`usage: team say <builder|reviewer|product|qa> <message>`);
+  if (!role || !words.length) fail(`usage: team say <minion> <message>. The minions: ${Object.keys(MINIONS).join(', ')}.`);
   const message = words.join(' ');
   if (!oneLine(message)) fail('a message must be one line.');
   if (!ws) fail(`the team is not running. Start it with team-up.`);
@@ -94,7 +95,7 @@ if (command === 'say') {
   log(`${nameOf(me)} -> ${MINIONS[role]}: ${message}`);
   const reply = me === 'gru' ? '' : ` (to reply: team say ${me} "...")`;
   try {
-    herdr('agent', 'prompt', pane.pane_id, `[from ${nameOf(me)}] ${roleNote(role, pane.agent)}${message}${reply}`);
+    herdr('agent', 'prompt', pane.pane_id, `[from ${nameOf(me)}] ${roleNote(role, pane.agent, promptFile(root, role))}${message}${reply}`);
   } catch (e) {
     if (e.code === 'agent_blocked') fail(`${MINIONS[role]} is waiting at a question in its pane. Gru must answer it first. The message is in .team/LOG.md.`);
     throw e;

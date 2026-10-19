@@ -1,6 +1,1 @@
-{
-  "builder": "claude",
-  "reviewer": "codex",
-  "product": "claude",
-  "qa": "claude"
-}
+{}
