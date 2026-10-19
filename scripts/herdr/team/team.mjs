@@ -2,22 +2,24 @@
 // team: how the minions and Gru talk to each other. Run it anywhere inside a project that has a
 // .team/ folder (team-up makes it). The commands are in USAGE below.
 //
-// Files are the record: every message goes to .team/LOG.md, escalations to ESCALATIONS.md, and
-// decisions to DECISIONS.md. A message is typed into the minion's pane and never waits for an
-// answer, so two minions can never wait on each other.
+// Files are the record: every message goes to .team/LOG.md, escalations to ESCALATIONS.md,
+// decisions to DECISIONS.md, and lessons to LESSONS.md. A message is typed into the minion's pane
+// and never waits for an answer, so two minions can never wait on each other.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { MINIONS, herdr, notify, roleNote, roleOf, teamLabel } from '../lib/herdr.mjs';
+import { addLesson, lessonBody } from './lessons.mjs';
 
 const USAGE = `Usage:
   team say <minion> <message>                 message builder, reviewer, product or qa
   team escalate <topic>                       ask Gru for a decision
   team decide <E-n> <decision> [revisit if]   Gru answers an escalation
+  team learn <rule> --from <source>           add a lesson to .team/LESSONS.md
   team status                                 the board, open escalations, latest decisions
   team down                                   close the team workspace`;
 
 const [command, ...args] = process.argv.slice(2);
-if (!['say', 'escalate', 'decide', 'status', 'down'].includes(command)) {
+if (!['say', 'escalate', 'decide', 'learn', 'status', 'down'].includes(command)) {
   console.error(USAGE);
   process.exit(command ? 1 : 0);
 }
@@ -116,6 +118,20 @@ if (command === 'say') {
     } catch (e) { console.error(`team: could not tell ${pane.label}: ${e.code}`); }
   }
   console.log(did);
+} else if (command === 'learn') {
+  // The rule and the source are one line each, so a lesson can never add a second line to the file.
+  const [rule, flag, source] = args;
+  const oneLine = (text) => !/[\r\n]/.test(text) && text.trim();
+  if (args.length !== 3 || flag !== '--from' || !oneLine(rule) || !oneLine(source)) fail('usage: team learn <rule> --from <source>');
+  // "Why:" separates the rule from the source, so a lesson line has it exactly once.
+  if ([rule, source].some((t) => t.includes('Why:'))) fail('a rule or source cannot contain "Why:". It separates the two in the lesson line.');
+  if (!existsSync(file('LESSONS.md'))) fail('there is no .team/LESSONS.md. Run team-up to create it.');
+  const body = lessonBody(rule.trim(), source.trim());
+  let added;
+  try { added = addLesson(read('LESSONS.md'), body); } catch (e) { fail(`.team/LESSONS.md ${e.message}`); }
+  writeFileSync(file('LESSONS.md'), added.text);
+  log(`${nameOf(me)} learned ${added.id}: ${body}`);
+  console.log(added.id);
 } else if (command === 'status') {
   console.log(read('BOARD.md').trim());
   const open = read('ESCALATIONS.md').split('\n').filter((l) => /^## E-\d+ .* OPEN$/.test(l));

@@ -113,6 +113,67 @@ test('team status shows the board, open escalations and decisions', () => {
   assert.match(out, /## D-1/);
 });
 
+const TEMPLATE_LESSONS = readFileSync(new URL('./templates/LESSONS.md', import.meta.url), 'utf8');
+const range = (n) => Array.from({ length: n }, (_, i) => i + 1);
+const setLessons = (text) => writeFileSync(join(project, '.team', 'LESSONS.md'), text);
+// The template with these lesson numbers under Lessons, and these lines under Watching.
+const lessonsFile = (numbers, watching = []) => TEMPLATE_LESSONS
+  .replace('## Lessons\n', () => `## Lessons\n\n${numbers.map((n) => `L-${n} Rule ${n}. Why: PR #${n}.\n`).join('')}`)
+  .replace(/## Watching.*\n/, (heading) => `${heading}\n${watching.map((w) => `${w}\n`).join('')}`);
+
+// Runs team learn, and checks that it failed and left LESSONS.md and LOG.md as they were.
+function refused(...args) {
+  const before = [teamFile('LESSONS.md'), teamFile('LOG.md')];
+  const result = run(TEAM, ['learn', ...args]);
+  assert.equal(result.code, 1);
+  assert.deepEqual([teamFile('LESSONS.md'), teamFile('LOG.md')], before);
+  return result.err;
+}
+
+test('team learn adds the next lesson last in Lessons, and logs who added it', () => {
+  const before = lessonsFile([1, 20], ['W-1 Watch 1. Why: PR #1.']);
+  setLessons(before);
+  const log = teamFile('LOG.md');
+  setState({ current: paneOf('reviewer-minion') });
+  const { code, out } = run(TEAM, ['learn', 'x', '--from', 'y']);
+  setState({ current: null });
+  assert.equal(code, 0);
+  // The next number comes after the highest one, not after the count.
+  assert.equal(out.trim(), 'L-21');
+  assert.equal(teamFile('LESSONS.md'), before.replace('PR #20.\n', 'PR #20.\nL-21 x. Why: y.\n'));
+  assert.match(teamFile('LOG.md').slice(log.length), /^[\d-]+ [\d:]+ reviewer-minion learned L-21: x\. Why: y\.\n$/);
+});
+
+test('team learn refuses a 16th lesson, and Watching lines do not count', () => {
+  setLessons(lessonsFile(range(15)));
+  assert.match(refused('x', '--from', 'y'), /has 15 lessons.*Merge two lessons or drop one/);
+  // A lesson under another heading above Watching counts too.
+  setLessons(lessonsFile(range(14)).replace('## Watching', '## Merged\nL-15 Rule 15. Why: PR #15.\n\n## Watching'));
+  assert.match(refused('x', '--from', 'y'), /has 15 lessons/);
+  setLessons(lessonsFile(range(14), range(10).map((n) => `W-${n} Watch ${n}. Why: PR #${n}.`)));
+  assert.equal(run(TEAM, ['learn', 'x', '--from', 'y']).out.trim(), 'L-15');
+});
+
+test('team learn starts at L-1, adds no second ".", and keeps quotes and $ as they are', () => {
+  setLessons(TEMPLATE_LESSONS);
+  // The example "L-1" in the rules at the top of the template is not a lesson.
+  assert.equal(run(TEAM, ['learn', 'Quote "it" and $HOME.', '--from', "PR #3's $1"]).out.trim(), 'L-1');
+  assert.equal(teamFile('LESSONS.md'), TEMPLATE_LESSONS.replace('## Lessons\n', () => `## Lessons\n\nL-1 Quote "it" and $HOME. Why: PR #3's $1.\n`));
+});
+
+test('team learn refuses bad input, and a file with no Lessons heading', () => {
+  const bad = [[], ['x'], ['x', '--from'], ['', '--from', 'y'], ['  ', '--from', 'y'], ['x', '--from', ''],
+    ['x', '--from', 'y', 'z'], ['x', '--form', 'y'], ['x\n## Watching', '--from', 'y'], ['x', '--from', 'y\r']];
+  for (const args of bad) assert.match(refused(...args), /usage: team learn <rule> --from <source>/, JSON.stringify(args));
+  // "Why:" may appear only once in a lesson line, between the rule and the source.
+  for (const args of [['a Why: b', '--from', 'y'], ['Why: a', '--from', 'y'], ['Ask Why:', '--from', 'y'], ['x', '--from', 'Why: PR #3']]) {
+    assert.match(refused(...args), /cannot contain "Why:"/, JSON.stringify(args));
+  }
+  setLessons('# LESSONS\n\n## Watching\n');
+  assert.match(refused('x', '--from', 'y'), /has no "## Lessons" heading/);
+  setLessons(TEMPLATE_LESSONS);
+});
+
 test('team down closes the team workspace', () => {
   assert.equal(run(TEAM, ['down']).code, 0);
   assert.deepEqual(state().workspaces, []);
