@@ -6,7 +6,7 @@
 // so you can switch tools at any time. A workspace whose label ends in " minions" is a team:
 // it also gets "product-minion" and "qa-minion", and each minion starts with its role prompt.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,21 @@ export const MINIONS = { builder: 'builder-minion', reviewer: 'reviewer-minion',
 // The label of a project's team workspace, and whether a workspace label is one.
 export const teamLabel = (dir) => `${basename(dir)} minions`;
 export const isTeam = (label) => /\sminions$/.test(label ?? '');
+
+// The running team workspace of a project folder, or null. Two projects with the same folder
+// name have the same label, so the workspace must also have a pane in this folder. The caller's
+// own workspace wins when two match.
+export function findTeam(root) {
+  const real = (dir) => { try { return realpathSync(dir); } catch { return dir; } };
+  const home = real(root);
+  const inHome = (pane) => pane.cwd && (real(pane.cwd) === home || real(pane.cwd).startsWith(`${home}/`));
+  let named = [];
+  try { named = herdr('workspace', 'list').workspaces.filter((w) => w.label === teamLabel(root)); } catch { return null; }
+  const ours = named.filter((w) => {
+    try { return herdr('pane', 'list', '--workspace', w.workspace_id).panes.some(inHome); } catch { return false; }
+  });
+  return ours.find((w) => w.workspace_id === process.env.HERDR_WORKSPACE_ID) ?? ours[0] ?? null;
+}
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

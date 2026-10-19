@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MINIONS, ensureLayout, herdr, roleNote, sendPrompt, sleep, teamLabel, waitReady } from '../lib/herdr.mjs';
+import { MINIONS, ensureLayout, findTeam, herdr, roleNote, sendPrompt, sleep, teamLabel, waitReady } from '../lib/herdr.mjs';
 import { LIMIT, PROMOTED, addLesson, promotedBodies } from './lessons.mjs';
 
 const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), 'templates');
@@ -83,7 +83,7 @@ async function main() {
     return;
   }
   const label = teamLabel(root);
-  const running = herdr('workspace', 'list').workspaces.find((w) => w.label === label);
+  const running = findTeam(root);
   if (running) {
     await layout(running.workspace_id);
     herdr('workspace', 'focus', running.workspace_id);

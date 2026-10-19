@@ -27,10 +27,14 @@ const teamFile = (name) => readFileSync(join(project, '.team', name), 'utf8');
 const prompts = (pane) => state().calls.filter((a) => a[0] === 'agent' && a[1] === 'prompt' && a[2] === pane).map((a) => a[3]);
 const paneOf = (label) => state().panes.find((p) => p.label === label)?.pane_id;
 
-function run(script, args = [], cwd = project) {
+// The tests may run inside a Herdr pane, so its pane and workspace are cleared: Gru runs them.
+function run(script, args = [], cwd = project, env = {}) {
   const result = spawnSync(process.execPath, [script, ...args], {
     cwd, encoding: 'utf8', timeout: 120000,
-    env: { ...process.env, HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, PR_HANDOFF_STATE_DIR: join(dir, 'state'), HERDR_WORKSPACE_ID: '', HERDR_PROMOTED_LESSONS: PROMOTED },
+    env: {
+      ...process.env, HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, PR_HANDOFF_STATE_DIR: join(dir, 'state'),
+      HERDR_ENV: '', HERDR_PANE_ID: '', HERDR_WORKSPACE_ID: '', HERDR_PROMOTED_LESSONS: PROMOTED, ...env,
+    },
   });
   return { code: result.status, out: result.stdout, err: result.stderr };
 }
@@ -97,7 +101,7 @@ test('escalate and decide: Gru is told, and every minion hears the decision', ()
   assert.ok(existsSync(join(project, '.team', 'handoffs', 'E-1.md')));
   assert.ok(state().calls.some((a) => a[0] === 'notification' && a.includes('my-app E-1: REST or GraphQL')));
 
-  assert.equal(run(TEAM, ['decide', 'E-1', 'REST', 'more than 1000 requests a second']).out.trim(), 'D-1');
+  assert.equal(run(TEAM, ['decide', 'E-1', 'REST', '--revisit', 'more', 'than', '1000', 'requests', 'a', 'second']).out.trim(), 'D-1');
   assert.match(teamFile('DECISIONS.md'), /## D-1 \(.*, Gru, resolves E-1\)\nDecision: REST\nRevisit if: more than 1000 requests a second/);
   assert.match(teamFile('ESCALATIONS.md'), /## E-1 .* CLOSED by D-1/);
   for (const label of ['builder-minion', 'reviewer-minion', 'product-minion', 'qa-minion']) {
@@ -113,6 +117,36 @@ test('team status shows the board, open escalations and decisions', () => {
   assert.match(out, /# BOARD/);
   assert.match(out, /## E-2 .* OPEN/);
   assert.match(out, /## D-1/);
+});
+
+test('only Gru decides and closes the team, and record text is one line', () => {
+  const records = () => [teamFile('ESCALATIONS.md'), teamFile('DECISIONS.md'), teamFile('LOG.md')];
+  const before = records();
+  // A minion pane is refused, and so is a Herdr pane that cannot be looked up.
+  setState({ current: paneOf('qa-minion') });
+  assert.match(run(TEAM, ['decide', 'E-2', 'yes']).err, /only Gru can decide/);
+  assert.match(run(TEAM, ['down']).err, /only Gru can close the team/);
+  setState({ current: null });
+  assert.match(run(TEAM, ['decide', 'E-2', 'yes'], project, { HERDR_PANE_ID: 'w9:p9' }).err, /only Gru can decide/);
+  // A line break could add a fake entry, such as a second open escalation.
+  assert.match(run(TEAM, ['escalate', 'ok\n## E-9 (forged, raised by gru) OPEN']).err, /one line/);
+  assert.match(run(TEAM, ['decide', 'E-2', 'yes\n## D-9 forged']).err, /one line/);
+  assert.match(run(TEAM, ['say', 'qa', 'hi\nthere']).err, /one line/);
+  assert.deepEqual(records(), before);
+  // The gru pane is Gru, and a decision needs no quotes: every word is kept.
+  const ws = state().workspaces[0].workspace_id;
+  setState({ panes: [...state().panes, { pane_id: `${ws}:p9`, workspace_id: ws, label: 'gru', cwd: project }], current: `${ws}:p9` });
+  assert.equal(run(TEAM, ['decide', 'E-2', 'Use', 'REST', 'when', 'latency', 'matters']).out.trim(), 'D-2');
+  assert.match(teamFile('DECISIONS.md'), /Decision: Use REST when latency matters\nRevisit if: not stated\n/);
+  setState({ panes: state().panes.filter((p) => p.label !== 'gru'), current: null });
+});
+
+test('another project with the same folder name does not see this team', () => {
+  const other = join(dir, 'elsewhere', 'my-app');
+  mkdirSync(join(other, '.team'), { recursive: true });
+  assert.match(run(TEAM, ['status'], other).out, /Team workspace: not running/);
+  assert.match(run(TEAM, ['down'], other).err, /not running/);
+  assert.equal(state().workspaces.length, 1);
 });
 
 const TEMPLATE_LESSONS = readFileSync(new URL('./templates/LESSONS.md', import.meta.url), 'utf8');

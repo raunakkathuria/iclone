@@ -7,18 +7,18 @@
 // and never waits for an answer, so two minions can never wait on each other.
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { MINIONS, herdr, notify, roleNote, roleOf, teamLabel } from '../lib/herdr.mjs';
+import { MINIONS, findTeam, herdr, notify, roleNote, roleOf } from '../lib/herdr.mjs';
 import { PROMOTED, addLesson, addPromoted, findLesson, lessonBody, oneWhy, takeWatching } from './lessons.mjs';
 
 const USAGE = `Usage:
-  team say <minion> <message>                 message builder, reviewer, product or qa
-  team escalate <topic>                       ask Gru for a decision
-  team decide <E-n> <decision> [revisit if]   Gru answers an escalation
-  team learn <rule> --from <source>           add a lesson to .team/LESSONS.md
-  team learn <W-n>                            move a Watching line up to the lessons
-  team promote <L-n>                          Gru gives a lesson to every new project
-  team status                                 the board, open escalations, latest decisions
-  team down                                   close the team workspace`;
+  team say <minion> <message>                       message builder, reviewer, product or qa
+  team escalate <topic>                             ask Gru for a decision
+  team decide <E-n> <decision> [--revisit <when>]   Gru answers an escalation
+  team learn <rule> --from <source>                 add a lesson to .team/LESSONS.md
+  team learn <W-n>                                  move a Watching line up to the lessons
+  team promote <L-n>                                Gru gives a lesson to every new project
+  team status                                       the board, open escalations, latest decisions
+  team down                                         Gru closes the team workspace`;
 
 const [command, ...args] = process.argv.slice(2);
 if (!['say', 'escalate', 'decide', 'learn', 'promote', 'status', 'down'].includes(command)) {
@@ -42,16 +42,12 @@ function projectRoot(dir = process.cwd()) {
 const root = projectRoot();
 const file = (name) => join(root, '.team', name);
 const read = (name) => (existsSync(file(name)) ? readFileSync(file(name), 'utf8') : '');
-const now = () => new Date().toISOString().slice(0, 16).replace('T', ' ');
+// Local time, as Gru reads it: "2026-10-19 21:16".
+const now = () => {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16).replace('T', ' ');
+};
 const log = (line) => appendFileSync(file('LOG.md'), `${now()} ${line}\n`);
-
-// The team's Herdr workspace, or null when the team is not running. The caller's own workspace
-// wins when two projects share a folder name.
-function teamWorkspace() {
-  let all = [];
-  try { all = herdr('workspace', 'list').workspaces.filter((w) => w.label === teamLabel(root)); } catch { /* no Herdr */ }
-  return all.find((w) => w.workspace_id === process.env.HERDR_WORKSPACE_ID) ?? all[0] ?? null;
-}
 
 const minionPanes = (ws) => herdr('pane', 'list', '--workspace', ws.workspace_id).panes.filter((p) => roleOf(p.label));
 
@@ -67,10 +63,22 @@ function caller(ws, pane) {
 }
 const nameOf = (role) => MINIONS[role] ?? role;
 
+// Text that goes into a record file must be one line: a line break could add a fake entry,
+// such as a second "## E-n ... OPEN" heading.
+const oneLine = (text) => !/[\r\n]/.test(text) && text.trim();
+
+// Gru's commands refuse a minion pane in any workspace, and a Herdr pane that cannot be looked
+// up: a minion with a broken herdr must not pass as Gru.
+function gruOnly(what) {
+  if (roleOf(here?.label) || (!here && process.env.HERDR_PANE_ID)) {
+    fail(`only Gru can ${what}. Run it outside the minion panes, for example in the gru pane.`);
+  }
+}
+
 // The next free ID: E-3 after E-1 and E-2.
 const nextId = (text, prefix) => `${prefix}-${Math.max(0, ...[...text.matchAll(new RegExp(`^## ${prefix}-(\\d+)`, 'gm'))].map((m) => Number(m[1]))) + 1}`;
 
-const ws = teamWorkspace();
+const ws = findTeam(root);
 const here = currentPane();
 const me = caller(ws, here);
 
@@ -79,6 +87,7 @@ if (command === 'say') {
   const role = roleOf(to) ?? roleOf(`${to}-minion`);
   if (!role || !words.length) fail(`usage: team say <builder|reviewer|product|qa> <message>`);
   const message = words.join(' ');
+  if (!oneLine(message)) fail('a message must be one line.');
   if (!ws) fail(`the team is not running. Start it with team-up.`);
   const pane = minionPanes(ws).find((p) => roleOf(p.label) === role);
   if (!pane) fail(`no ${MINIONS[role]} pane in workspace ${ws.workspace_id}.`);
@@ -94,6 +103,7 @@ if (command === 'say') {
 } else if (command === 'escalate') {
   const topic = args.join(' ');
   if (!topic) fail('usage: team escalate <topic>');
+  if (!oneLine(topic)) fail('a topic must be one line. Put the details in the handoff file.');
   const id = nextId(read('ESCALATIONS.md'), 'E');
   const details = `.team/handoffs/${id}.md`;
   appendFileSync(file('ESCALATIONS.md'), `\n## ${id} (${now()}, raised by ${nameOf(me)}) OPEN\nTopic: ${topic}\nDetails: ${details}\n`);
@@ -104,16 +114,23 @@ if (command === 'say') {
   notify('Gru, a decision is needed', `${basename(root)} ${id}: ${topic}`);
   console.log(`${id}. Fill in ${details}, then wait for Gru's decision.`);
 } else if (command === 'decide') {
-  const [id, decision, revisit = 'not stated'] = args;
-  if (!/^E-\d+$/.test(id ?? '') || !decision) fail('usage: team decide <E-n> <decision> [revisit if]');
+  // The words after the ID are the decision, up to --revisit; the words after it say when to
+  // revisit. No quotes are needed, and no word is dropped.
+  gruOnly('decide an escalation');
+  const [id, ...words] = args;
+  const at = words.indexOf('--revisit');
+  const decision = (at < 0 ? words : words.slice(0, at)).join(' ');
+  const revisit = at < 0 ? 'not stated' : words.slice(at + 1).join(' ');
+  if (!/^E-\d+$/.test(id ?? '') || !decision || (at >= 0 && !revisit)) fail('usage: team decide <E-n> <decision> [--revisit <when>]');
+  if (!oneLine(decision) || !oneLine(revisit)) fail('a decision and its revisit text must be one line each.');
   const open = `## ${id} (`;
   const text = read('ESCALATIONS.md');
-  const at = text.split('\n').findIndex((l) => l.startsWith(open) && l.endsWith(' OPEN'));
-  if (at < 0) fail(`${id} is not an open escalation.`);
+  const line = text.split('\n').findIndex((l) => l.startsWith(open) && l.endsWith(' OPEN'));
+  if (line < 0) fail(`${id} is not an open escalation.`);
   const did = nextId(read('DECISIONS.md'), 'D');
   appendFileSync(file('DECISIONS.md'), `\n## ${did} (${now()}, Gru, resolves ${id})\nDecision: ${decision}\nRevisit if: ${revisit}\n`);
   const lines = text.split('\n');
-  lines[at] = `${lines[at].slice(0, -' OPEN'.length)} CLOSED by ${did}`;
+  lines[line] = `${lines[line].slice(0, -' OPEN'.length)} CLOSED by ${did}`;
   writeFileSync(file('ESCALATIONS.md'), lines.join('\n'));
   log(`gru decided ${did} (resolves ${id}): ${decision}`);
   if (!ws) console.log('The team is not running, so no minion was told.');
@@ -127,8 +144,6 @@ if (command === 'say') {
   // A new lesson from a rule and a source, or the W-n line that moves up from Watching.
   const [rule, flag, source] = args;
   const watching = args.length === 1 && /^W-\d+$/.test(rule) ? rule : null;
-  // The rule and the source are one line each, so a lesson can never add a second line to the file.
-  const oneLine = (text) => !/[\r\n]/.test(text) && text.trim();
   if (!watching && (args.length !== 3 || flag !== '--from' || !oneLine(rule) || !oneLine(source))) {
     fail('usage: team learn <rule> --from <source>, or team learn <W-n>');
   }
@@ -148,7 +163,7 @@ if (command === 'say') {
   // The global list reaches every later project, so a minion pane in any workspace is refused.
   const [id] = args;
   if (args.length !== 1 || !/^L-\d+$/.test(id)) fail('usage: team promote <L-n>');
-  if (roleOf(here?.label)) fail('only Gru can promote a lesson. Ask Gru to run team promote outside the minion panes.');
+  gruOnly('promote a lesson');
   if (!existsSync(file('LESSONS.md'))) fail('there is no .team/LESSONS.md. Run team-up to create it.');
   let body;
   let list;
@@ -169,6 +184,7 @@ if (command === 'say') {
   console.log(`\nLatest decisions:\n${decisions.join('\n') || '(none)'}`);
   console.log(`\nTeam workspace: ${ws ? ws.workspace_id : 'not running'}`);
 } else if (command === 'down') {
+  gruOnly('close the team');
   if (!ws) fail('the team is not running.');
   herdr('workspace', 'close', ws.workspace_id);
   console.log(`closed ${ws.label}`);
