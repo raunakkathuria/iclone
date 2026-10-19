@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // team-up [project folder]: starts the minion team for a project in Herdr.
 //
-// 1. Creates .team/ from the templates. It never overwrites a file that is there.
+// 1. Creates .team/ from the templates. It never overwrites a file that is there. A new
+//    LESSONS.md also gets every lesson in the global list, from team promote.
 // 2. Stops while .team/GOAL.md is still the template: Gru writes the goal first.
 // 3. Opens a workspace named "<project> minions". The layout code (ensureLayout in
 //    lib/herdr.mjs, also run by the Herdr plugin) fills it with four minions, each with its role.
@@ -13,6 +14,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFi
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MINIONS, ensureLayout, herdr, roleNote, sendPrompt, sleep, teamLabel, waitReady } from '../lib/herdr.mjs';
+import { LIMIT, PROMOTED, addLesson, promotedBodies } from './lessons.mjs';
 
 const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), 'templates');
 const KICKOFF = {
@@ -26,12 +28,24 @@ function gitRoot(dir) {
   try { return execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; }
 }
 
+// A new project's LESSONS.md: the template, with each lesson in the global list as L-1, L-2 and so
+// on, in the list's order. A missing or broken list adds none.
+function newLessons() {
+  const bodies = promotedBodies(existsSync(PROMOTED) ? readFileSync(PROMOTED, 'utf8') : '');
+  if (bodies.length > LIMIT) throw new Error(`${PROMOTED} has ${bodies.length} lessons, more than ${LIMIT}. Merge two lessons or drop one, then run team-up again.`);
+  return bodies.reduce((text, body) => addLesson(text, body).text, readFileSync(join(TEMPLATES, 'LESSONS.md'), 'utf8'));
+}
+
 // Creates what is missing in .team/. Returns true when GOAL.md still needs Gru.
 function scaffold(root) {
   const team = join(root, '.team');
+  // Built before anything is written, so a bad global list leaves .team/ as it was.
+  const lessons = existsSync(join(team, 'LESSONS.md')) ? null : newLessons();
   for (const dir of ['gate', 'handoffs', 'qa']) mkdirSync(join(team, dir), { recursive: true });
   for (const name of readdirSync(TEMPLATES)) {
-    if (!existsSync(join(team, name))) copyFileSync(join(TEMPLATES, name), join(team, name));
+    if (existsSync(join(team, name))) continue;
+    if (name === 'LESSONS.md') writeFileSync(join(team, name), lessons);
+    else copyFileSync(join(TEMPLATES, name), join(team, name));
   }
   if (!existsSync(join(team, '.gitignore'))) writeFileSync(join(team, '.gitignore'), 'LOG.md\n');
   return readFileSync(join(team, 'GOAL.md'), 'utf8') === readFileSync(join(TEMPLATES, 'GOAL.md'), 'utf8');

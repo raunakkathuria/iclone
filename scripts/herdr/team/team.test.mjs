@@ -2,7 +2,7 @@
 // Runs team-up and team against the fake herdr, in a throwaway project folder.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -260,6 +260,39 @@ test('team promote writes through the install link, and install.sh makes that li
   assert.equal(readFileSync(checkout, 'utf8'), '- Rule 2. Why: PR #2. Promoted from my-app L-2.\n');
   rmSync(PROMOTED);
   setLessons(TEMPLATE_LESSONS);
+});
+
+test('team-up gives a new project every promoted lesson, and leaves an existing LESSONS.md alone', () => {
+  const folder = (name) => { mkdirSync(join(dir, name)); return join(dir, name); };
+  const lessonsIn = (d) => readFileSync(join(d, '.team', 'LESSONS.md'), 'utf8');
+  // With no global list, or a link to a deleted checkout, a new project gets the plain template.
+  const plain = folder('plain-app');
+  assert.equal(run(TEAM_UP, [plain]).code, 0);
+  assert.equal(lessonsIn(plain), TEMPLATE_LESSONS);
+  symlinkSync(join(dir, 'deleted-checkout', 'promoted-lessons.md'), PROMOTED);
+  const broken = folder('broken-app');
+  assert.equal(run(TEAM_UP, [broken]).code, 0);
+  assert.equal(lessonsIn(broken), TEMPLATE_LESSONS);
+  unlinkSync(PROMOTED);
+
+  writeFileSync(PROMOTED, '# Promoted lessons\n\n- r5. Why: s5. Promoted from app-a L-5.\n- r3. Why: s3. Promoted from app-a L-3.\n');
+  const b = folder('app-b');
+  assert.equal(run(TEAM_UP, [b]).code, 0);
+  assert.equal(lessonsIn(b), TEMPLATE_LESSONS.replace('## Lessons\n', () => '## Lessons\n\nL-1 r5. Why: s5. Promoted from app-a L-5.\nL-2 r3. Why: s3. Promoted from app-a L-3.\n'));
+  const c = folder('app-c');
+  mkdirSync(join(c, '.team'));
+  writeFileSync(join(c, '.team', 'LESSONS.md'), 'Our own lessons.\n');
+  assert.equal(run(TEAM_UP, [c]).code, 0);
+  assert.equal(lessonsIn(c), 'Our own lessons.\n');
+
+  // A hand-edited list with more than 15 lessons stops team-up before it writes anything.
+  writeFileSync(PROMOTED, range(16).map((n) => `- r${n}. Why: s. Promoted from a L-${n}.\n`).join(''));
+  const d = folder('app-d');
+  const full = run(TEAM_UP, [d]);
+  assert.equal(full.code, 1);
+  assert.match(full.err, /has 16 lessons, more than 15\. Merge two lessons or drop one/);
+  assert.equal(existsSync(join(d, '.team')), false);
+  rmSync(PROMOTED);
 });
 
 test('team down closes the team workspace', () => {
