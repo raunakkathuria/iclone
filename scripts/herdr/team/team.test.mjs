@@ -2,9 +2,9 @@
 // Runs team-up and team against the fake herdr, in a throwaway project folder.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -15,6 +15,8 @@ const FAKE_HERDR = fileURLToPath(new URL('../test/fake-herdr.cjs', import.meta.u
 const dir = mkdtempSync(join(tmpdir(), 'team-'));
 const project = join(dir, 'my-app');
 const herdrState = join(dir, 'herdr.json');
+// Every run uses this global list, so no test can change the real one.
+const PROMOTED = join(dir, 'promoted-lessons.md');
 mkdirSync(project);
 writeFileSync(herdrState, JSON.stringify({ mode: 'ok', panes: [], next: 1, calls: [], workspaces: [] }));
 test.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -28,7 +30,7 @@ const paneOf = (label) => state().panes.find((p) => p.label === label)?.pane_id;
 function run(script, args = [], cwd = project) {
   const result = spawnSync(process.execPath, [script, ...args], {
     cwd, encoding: 'utf8', timeout: 120000,
-    env: { ...process.env, HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, PR_HANDOFF_STATE_DIR: join(dir, 'state'), HERDR_WORKSPACE_ID: '' },
+    env: { ...process.env, HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, PR_HANDOFF_STATE_DIR: join(dir, 'state'), HERDR_WORKSPACE_ID: '', HERDR_PROMOTED_LESSONS: PROMOTED },
   });
   return { code: result.status, out: result.stdout, err: result.stderr };
 }
@@ -121,14 +123,19 @@ const lessonsFile = (numbers, watching = []) => TEMPLATE_LESSONS
   .replace('## Lessons\n', () => `## Lessons\n\n${numbers.map((n) => `L-${n} Rule ${n}. Why: PR #${n}.\n`).join('')}`)
   .replace(/## Watching.*\n/, (heading) => `${heading}\n${watching.map((w) => `${w}\n`).join('')}`);
 
-// Runs team learn, and checks that it failed and left LESSONS.md and LOG.md as they were.
-function refused(...args) {
-  const before = [teamFile('LESSONS.md'), teamFile('LOG.md')];
-  const result = run(TEAM, ['learn', ...args]);
+const promoted = () => (existsSync(PROMOTED) ? readFileSync(PROMOTED, 'utf8') : null);
+
+// Runs a team command, and checks that it failed and left LESSONS.md, LOG.md and the global list
+// as they were.
+function refusedBy(...args) {
+  const files = () => [teamFile('LESSONS.md'), teamFile('LOG.md'), promoted()];
+  const before = files();
+  const result = run(TEAM, args);
   assert.equal(result.code, 1);
-  assert.deepEqual([teamFile('LESSONS.md'), teamFile('LOG.md')], before);
+  assert.deepEqual(files(), before);
   return result.err;
 }
+const refused = (...args) => refusedBy('learn', ...args);
 
 test('team learn adds the next lesson last in Lessons, and logs who added it', () => {
   const before = lessonsFile([1, 20], ['W-1 Watch 1. Why: PR #1.']);
@@ -194,6 +201,64 @@ test('team learn W-n refuses a full list, a missing W-n, and a line without one 
   for (const id of ['W-2', 'W-3']) assert.match(refused(id), new RegExp(`has ${id}, which must have exactly one "Why:"`));
   setLessons('# LESSONS\n\n## Lessons\n');
   assert.match(refused('W-1'), /has no W-1 under "## Watching"/);
+  setLessons(TEMPLATE_LESSONS);
+});
+
+test('team promote adds a lesson to the global list, and only Gru can', () => {
+  const before = lessonsFile([2, 21]);
+  setLessons(before);
+  // A minion pane is refused in any workspace, not only in this team's workspace.
+  setState({ current: paneOf('reviewer-minion') });
+  assert.match(refusedBy('promote', 'L-2'), /only Gru can promote/);
+  setState({ panes: [...state().panes, { pane_id: 'w9:p1', workspace_id: 'w9', label: 'builder-minion' }], current: 'w9:p1' });
+  assert.match(refusedBy('promote', 'L-2'), /only Gru can promote/);
+  setState({ panes: state().panes.filter((p) => p.pane_id !== 'w9:p1'), current: null });
+
+  const log = teamFile('LOG.md');
+  const { code, out } = run(TEAM, ['promote', 'L-2']);
+  assert.equal(code, 0);
+  assert.ok(out.startsWith(`Promoted L-2 to ${PROMOTED}`), out);
+  assert.match(out, /does not commit\. Commit that file/);
+  // The first promote creates the list. L-2 never matches L-21.
+  assert.equal(promoted(), '- Rule 2. Why: PR #2. Promoted from my-app L-2.\n');
+  assert.equal(teamFile('LESSONS.md'), before);
+  assert.match(teamFile('LOG.md').slice(log.length), /^[\d-]+ [\d:]+ gru promoted L-2 to \S+: Rule 2\. Why: PR #2\.\n$/);
+});
+
+test('team promote refuses a promoted rule, a missing or bad lesson, a full list, and a list it cannot write', () => {
+  setLessons(lessonsFile([2, 21]).replace('PR #21.\n', 'PR #21.\nL-30 No source.\n'));
+  assert.match(refusedBy('promote', 'L-2'), /has this rule already, so it is already promoted: Rule 2\./);
+  assert.match(refusedBy('promote', 'L-9'), /has no L-9 under "## Lessons"/);
+  assert.match(refusedBy('promote', 'L-30'), /has L-30, which must have exactly one "Why:"/);
+  for (const args of [[], ['W-2'], ['L-x'], ['L-1', 'L-2']]) assert.match(refusedBy('promote', ...args), /usage: team promote <L-n>/);
+  writeFileSync(PROMOTED, range(15).map((n) => `- Rule ${n + 100}. Why: PR #${n}. Promoted from app L-${n}.\n`).join(''));
+  assert.match(refusedBy('promote', 'L-21'), /has 15 lessons.*Merge two lessons or drop one/);
+  writeFileSync(PROMOTED, '');
+  chmodSync(PROMOTED, 0o444);
+  try {
+    assert.ok(refusedBy('promote', 'L-21').includes(`cannot write ${PROMOTED} (EACCES)`));
+  } finally {
+    chmodSync(PROMOTED, 0o644);
+  }
+  rmSync(PROMOTED);
+  setLessons(TEMPLATE_LESSONS);
+});
+
+test('team promote writes through the install link, and install.sh makes that link after its copy', () => {
+  // D-1: right after the rsync, install.sh links the installed list to the checkout's file.
+  const install = readFileSync(new URL('../install.sh', import.meta.url), 'utf8').split('\n');
+  const rsync = install.findIndex((l) => l.startsWith('rsync -a --delete'));
+  const link = install.indexOf('ln -sfn "$SRC/team/promoted-lessons.md" "$REPO/team/promoted-lessons.md"');
+  assert.ok(rsync >= 0 && link > rsync, `rsync at line ${rsync + 1}, link at line ${link + 1}`);
+  // A promote writes the checkout's file, even before that file exists, and keeps the link.
+  const checkout = join(dir, 'checkout', 'promoted-lessons.md');
+  mkdirSync(dirname(checkout));
+  symlinkSync(checkout, PROMOTED);
+  setLessons(lessonsFile([2]));
+  assert.equal(run(TEAM, ['promote', 'L-2']).code, 0);
+  assert.ok(lstatSync(PROMOTED).isSymbolicLink(), 'promote replaced the link with a file');
+  assert.equal(readFileSync(checkout, 'utf8'), '- Rule 2. Why: PR #2. Promoted from my-app L-2.\n');
+  rmSync(PROMOTED);
   setLessons(TEMPLATE_LESSONS);
 });
 

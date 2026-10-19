@@ -6,7 +6,8 @@
 #
 # What it does:
 #   1. Copies this folder to ~/.agents/herdr, so switching branches in the repository never
-#      changes the live setup. Run it again after you change anything here.
+#      changes the live setup. Run it again after you change anything here. The one exception is
+#      team/promoted-lessons.md: the copy is a link to this checkout's file.
 #   2. Links the Herdr plugin in ~/.agents/herdr: every workspace gets a builder and a reviewer minion.
 #   3. Points ~/.agents/hooks/pr-review-handoff at ~/.agents/herdr/pr-review-handoff (a symlink),
 #      ~/.local/bin/herdr-review at ~/.agents/herdr/bin/herdr-review, and ~/.local/bin/team and
@@ -42,9 +43,17 @@ done
 backup() { [[ -e "$1" && ! -e "$1.bak-herdr-pair" ]] && cp -p "$1" "$1.bak-herdr-pair" || true; }
 
 # --- 1. Copy ---
+# Run from the copy itself, the link below would point at itself.
+if [[ "$SRC" -ef "$REPO" ]]; then
+  warn "run install.sh from the iclone checkout, not from $REPO: nothing installed"
+  exit 1
+fi
 mkdir -p "$REPO"
 rsync -a --delete --exclude .git --exclude test --exclude '*.test.mjs' --exclude review-loop.gif "$SRC/" "$REPO/"
-log "Copied $SRC to $REPO"
+# The global lesson list stays in this checkout: team promote writes it and team-up reads it
+# through this link, so a promoted lesson needs no new install and the next rsync cannot lose it.
+ln -sfn "$SRC/team/promoted-lessons.md" "$REPO/team/promoted-lessons.md"
+log "Copied $SRC to $REPO, and linked team/promoted-lessons.md back to it"
 
 # --- 2. Herdr plugin ---
 if herdr plugin list --json 2>/dev/null | grep -q '"raunakkathuria.pair"'; then

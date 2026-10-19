@@ -5,10 +5,10 @@
 // Files are the record: every message goes to .team/LOG.md, escalations to ESCALATIONS.md,
 // decisions to DECISIONS.md, and lessons to LESSONS.md. A message is typed into the minion's pane
 // and never waits for an answer, so two minions can never wait on each other.
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { MINIONS, herdr, notify, roleNote, roleOf, teamLabel } from '../lib/herdr.mjs';
-import { addLesson, lessonBody, oneWhy, takeWatching } from './lessons.mjs';
+import { PROMOTED, addLesson, addPromoted, findLesson, lessonBody, oneWhy, takeWatching } from './lessons.mjs';
 
 const USAGE = `Usage:
   team say <minion> <message>                 message builder, reviewer, product or qa
@@ -16,11 +16,12 @@ const USAGE = `Usage:
   team decide <E-n> <decision> [revisit if]   Gru answers an escalation
   team learn <rule> --from <source>           add a lesson to .team/LESSONS.md
   team learn <W-n>                            move a Watching line up to the lessons
+  team promote <L-n>                          Gru gives a lesson to every new project
   team status                                 the board, open escalations, latest decisions
   team down                                   close the team workspace`;
 
 const [command, ...args] = process.argv.slice(2);
-if (!['say', 'escalate', 'decide', 'learn', 'status', 'down'].includes(command)) {
+if (!['say', 'escalate', 'decide', 'learn', 'promote', 'status', 'down'].includes(command)) {
   console.error(USAGE);
   process.exit(command ? 1 : 0);
 }
@@ -54,13 +55,15 @@ function teamWorkspace() {
 
 const minionPanes = (ws) => herdr('pane', 'list', '--workspace', ws.workspace_id).panes.filter((p) => roleOf(p.label));
 
-// Who is calling: the minion whose pane runs this command, or Gru from anywhere else.
-function caller(ws) {
-  try {
-    const pane = herdr('pane', 'current', '--current').pane;
-    if (ws && pane?.workspace_id === ws.workspace_id && roleOf(pane.label)) return roleOf(pane.label);
-  } catch { /* not in a Herdr pane */ }
-  return 'gru';
+// The Herdr pane that runs this command, or null outside Herdr.
+function currentPane() {
+  try { return herdr('pane', 'current', '--current').pane; } catch { return null; }
+}
+
+// Who is calling: the minion whose pane in the team's workspace runs this command, or Gru from
+// anywhere else.
+function caller(ws, pane) {
+  return ws && pane?.workspace_id === ws.workspace_id && roleOf(pane.label) ? roleOf(pane.label) : 'gru';
 }
 const nameOf = (role) => MINIONS[role] ?? role;
 
@@ -68,7 +71,8 @@ const nameOf = (role) => MINIONS[role] ?? role;
 const nextId = (text, prefix) => `${prefix}-${Math.max(0, ...[...text.matchAll(new RegExp(`^## ${prefix}-(\\d+)`, 'gm'))].map((m) => Number(m[1]))) + 1}`;
 
 const ws = teamWorkspace();
-const me = caller(ws);
+const here = currentPane();
+const me = caller(ws, here);
 
 if (command === 'say') {
   const [to, ...words] = args;
@@ -140,6 +144,23 @@ if (command === 'say') {
   writeFileSync(file('LESSONS.md'), text);
   log(`${nameOf(me)} learned ${id}${watching ? ` from ${watching}` : ''}: ${body}`);
   console.log(id);
+} else if (command === 'promote') {
+  // The global list reaches every later project, so a minion pane in any workspace is refused.
+  const [id] = args;
+  if (args.length !== 1 || !/^L-\d+$/.test(id)) fail('usage: team promote <L-n>');
+  if (roleOf(here?.label)) fail('only Gru can promote a lesson. Ask Gru to run team promote outside the minion panes.');
+  if (!existsSync(file('LESSONS.md'))) fail('there is no .team/LESSONS.md. Run team-up to create it.');
+  let body;
+  let list;
+  try { body = findLesson(read('LESSONS.md'), id); } catch (e) { fail(`.team/LESSONS.md ${e.message}`); }
+  // A missing list, or a link to a list that does not exist yet, reads as empty.
+  try { list = addPromoted(existsSync(PROMOTED) ? readFileSync(PROMOTED, 'utf8') : '', body, `${basename(root)} ${id}`); } catch (e) { fail(`${PROMOTED} ${e.message}`); }
+  // Write through the D-1 link: a new file and a rename would replace the link.
+  try { writeFileSync(PROMOTED, list); } catch (e) { fail(`cannot write ${PROMOTED} (${e.code}). Nothing was promoted.`); }
+  log(`${nameOf(me)} promoted ${id} to ${PROMOTED}: ${body}`);
+  const real = realpathSync(PROMOTED);
+  console.log(`Promoted ${id} to ${PROMOTED}${real === PROMOTED ? '' : ` (that is ${real})`}.`);
+  console.log('team promote does not commit. Commit that file in its repository.');
 } else if (command === 'status') {
   console.log(read('BOARD.md').trim());
   const open = read('ESCALATIONS.md').split('\n').filter((l) => /^## E-\d+ .* OPEN$/.test(l));
