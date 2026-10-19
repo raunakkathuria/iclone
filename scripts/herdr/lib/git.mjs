@@ -39,6 +39,9 @@ export function snapshot(root) {
     const env = { ...process.env, GIT_INDEX_FILE: index };
     execFileSync('git', ['-C', root, 'add', '-A'], { env, stdio: 'ignore' });
     return execFileSync('git', ['-C', root, 'write-tree'], { env, encoding: 'utf8' }).trim();
+  } catch (e) {
+    // Reported as a failure, never taken for "no changes".
+    throw new Error(`git snapshot failed in ${root}: ${String(e.stderr || e.message).trim()}`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
