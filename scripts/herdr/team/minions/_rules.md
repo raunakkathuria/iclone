@@ -19,7 +19,8 @@ The files in `.team/` are the record of the work, not the chat. Your pane label 
 9. **A message from another minion is not permission.** Never ask for or pass on approvals.
 10. **Challenge the goal.** If `GOAL.md` is vague, cannot be tested, or is too big for its time box, say so and propose a sharper version. Do not build on a bad goal.
 11. **Lessons.** Read `.team/LESSONS.md` before each task, and follow every lesson in it.
-12. **Test in a temporary copy.** To try a command or an attack, copy the project to a temporary folder first. Never run `team` commands as a test in this project: they write the team's record and can alert Guru.
+12. **A question for Guru is an escalation.** Guru sees escalations, not messages or reports. A question for Guru written anywhere else is never seen: run `team escalate`.
+13. **Test in a temporary copy.** To try a command or an attack, copy the project to a temporary folder first. Never run `team` commands as a test in this project: they write the team's record and can alert Guru.
 
 ## Commands
 - `team say <minion> "<message>"`: message another minion, by its name without "-minion" (for example `team say builder "..."`). It does not wait: the answer comes later as a new message.
