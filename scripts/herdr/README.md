@@ -60,15 +60,19 @@ The hooks run from `~/.agents/hooks/pr-review-handoff`, a symlink to
 
 ## Change the default tools
 
-Edit `config.json` in this folder, then run `install.sh` again. The values are Herdr agent kinds,
-such as `claude`, `codex`, `cursor` or `kiro`. `product` and `qa` are used only by a team.
+Each minion's default tool is at the top of its file in `team/minions/`: Claude for the builder,
+Codex for the reviewer. To change it for every project, set it in `config.json` in this folder,
+then run `install.sh` again. The values are Herdr agent kinds, such as `claude`, `codex`, `cursor`
+or `kiro`.
 
 ```json
-{ "builder": "claude", "reviewer": "codex", "product": "claude", "qa": "claude" }
+{ "reviewer": "cursor" }
 ```
 
-An empty reviewer pane gets `reviewer`, unless the builder already runs that tool; then it gets
-`builder`. Set `PR_REVIEWER=<kind>` before you start a builder to choose the reviewer yourself.
+An empty reviewer pane gets the reviewer's tool, unless the builder already runs that tool; then
+it gets the builder's tool. Set `PR_REVIEWER=<kind>` before you start a builder to choose the
+reviewer yourself. A team can also set each minion's model and effort: see
+[team/README.md](team/README.md).
 
 ## Why it never loops
 
@@ -104,7 +108,7 @@ and `~/.codex/hooks.json`, and the `herdr-pair` block from `~/.codex/config.toml
 ## Tests
 
 ```bash
-node --test scripts/herdr/lib/herdr.test.mjs scripts/herdr/pr-review-handoff/hook.test.mjs scripts/herdr/team/team.test.mjs
+node --test scripts/herdr/lib/*.test.mjs scripts/herdr/pr-review-handoff/hook.test.mjs scripts/herdr/team/*.test.mjs
 ```
 
 The tests use a fake `herdr` (`test/fake-herdr.cjs`) and a fake `gh`. They change nothing on
