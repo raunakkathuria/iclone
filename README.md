@@ -100,9 +100,14 @@ it on. (A scheduler like OpenClaw's can do the same job if you'd rather not use 
 ## Minions in Herdr: moved to Gurukul
 
 The minion setup for [Herdr](https://herdr.dev) now lives in its own repository,
-[Gurukul](https://github.com/raunakkathuria/gurukul). In every Herdr workspace, a
-`builder-minion` codes and a `reviewer-minion` reviews its work. For bigger work, `team-up` starts
-a team of minions, with you as Guru, the boss.
+[Gurukul](https://github.com/raunakkathuria/gurukul). Once it is installed, in every Herdr
+workspace a `builder-minion` codes and a `reviewer-minion` reviews its work. For bigger work,
+`team-up` starts a team of minions, with you as Guru, the boss.
+
+To install it, clone Gurukul and run `./install.sh` there.
+[Its README](https://github.com/raunakkathuria/gurukul#install) lists what it needs. Gurukul has
+its own licence, the GNU Affero General Public License, version 3 (AGPL-3.0), not iclone's MIT
+licence.
 
 ## Use it
 
@@ -114,8 +119,7 @@ a team of minions, with you as Guru, the boss.
 5. Drop raw thoughts into `inbox/` (two examples are included — a blog idea and a product idea).
    Run `process-inbox` yourself, or let the workflow do it on a schedule.
 
-Nothing publishes on its own. The AI drafts; you decide. Always. (The one exception is opt-in: the
-PR review hook posts review comments and replies on your own PRs. It never merges anything.)
+Nothing publishes on its own. The AI drafts; you decide. Always.
 
 ## Licence
 
