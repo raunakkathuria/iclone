@@ -7,7 +7,7 @@
 // also gets the other minions its project's .team/team.json names, and each minion starts with
 // its role prompt. The minions themselves are files in team/minions/ (see minions.mjs).
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { CORE, REPO_ROOT, loadMinions, projectOf, readTeam, settingsOf, teamMembers, writePrompt } from './minions.mjs';
@@ -280,16 +280,52 @@ export async function sendPrompt(pane, text) {
   return false;
 }
 
-// One run at a time per key. A lock older than staleMs is left over from a crash.
-// tryLock returns a release function, or null when another run holds the lock.
+// Whether the process that took a lock has died, so the lock is left over. A lock with no
+// owner file yet is still being taken.
+function ownerGone(dir) {
+  try {
+    process.kill(Number(readFileSync(join(dir, 'owner'), 'utf8')), 0);
+    return false;
+  } catch (e) { return e.code === 'ESRCH'; }
+}
+
+// Takes the lock directory, with this process as its owner. False when another process has it.
+function take(dir) {
+  try { mkdirSync(dir); } catch { return false; }
+  writeFileSync(join(dir, 'owner'), String(process.pid));
+  return true;
+}
+
+// Removes a lock left over from a crash, and takes it. One process at a time may do this, in
+// its turn, so two processes can never both remove a lock and then both take it. A process that
+// died in its turn leaves the turn behind; after a minute it counts as left over too.
+function takeOver(dir, staleMs) {
+  const turn = `${dir}.takeover`;
+  try { mkdirSync(turn); } catch {
+    try { if (Date.now() - statSync(turn).mtimeMs > MINUTE) rmSync(turn, { recursive: true, force: true }); } catch { /* gone */ }
+    return false;
+  }
+  try {
+    let left;
+    try { left = ownerGone(dir) || Date.now() - statSync(dir).mtimeMs > staleMs; } catch { left = true; }
+    // For tests only: widens the gap between the check and the removal, where a race would be.
+    if (process.env.HERDR_LOCK_TEST_DELAY_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.HERDR_LOCK_TEST_DELAY_MS));
+    if (left) rmSync(dir, { recursive: true, force: true });
+    return take(dir);
+  } finally { rmSync(turn, { recursive: true, force: true }); }
+}
+
+// One run at a time per key. A lock is left over from a crash when its owner has died, or when
+// it is older than staleMs. tryLock returns a release function, or null when another run holds
+// the lock. Only the owner's release removes the lock, so a lock taken over is never removed by
+// the process it was taken from.
 export function tryLock(key, staleMs = 10 * MINUTE) {
   const dir = join(STATE_DIR, 'locks', key);
   mkdirSync(join(STATE_DIR, 'locks'), { recursive: true });
-  try { mkdirSync(dir); } catch {
-    try { if (Date.now() - statSync(dir).mtimeMs > staleMs) rmSync(dir, { recursive: true, force: true }); } catch { /* gone */ }
-    try { mkdirSync(dir); } catch { return null; }
-  }
-  return () => rmSync(dir, { recursive: true, force: true });
+  if (!take(dir) && !takeOver(dir, staleMs)) return null;
+  return () => {
+    try { if (readFileSync(join(dir, 'owner'), 'utf8') === String(process.pid)) rmSync(dir, { recursive: true, force: true }); } catch { /* gone */ }
+  };
 }
 
 // Waits for the lock instead of giving up.

@@ -73,7 +73,7 @@ list yourself.
 2. `product-minion` splits the goal into tasks on `.team/BOARD.md`.
 3. `builder-minion` asks `reviewer-minion` about any design choice, then builds the task.
 4. `builder-minion` writes its notes for the reviewer in the task's handoff file and runs
-   `herdr-review`. `reviewer-minion` reviews the work that is not committed yet: only this task.
+   `herdr-review`. `reviewer-minion` reviews what changed since the last review: only this task.
 5. `qa-minion` checks each acceptance criterion, writes PASS or FAIL, and tells the builder.
 6. The builder commits the task once QA passes it, then takes the next one.
 7. When two minions disagree, they get 2 rounds. Then the default owner decides:
@@ -171,8 +171,8 @@ change.
   Only the builder changes it through git. Claude minions other than the builder cannot run
   `git checkout`, `switch`, `stash`, `reset`, `commit`, `push`, `git -C` and the like
   (`--disallowedTools`). QA tests the files as they are, and the builder waits for QA's report.
-- **In a team, a review covers only the work that is not committed yet.** Each review stays small,
-  because the builder commits a task only after QA passes it.
+- **A review covers only what changed since the last one**, committed or not. `team-up` marks a
+  new team's starting point, so the team's first review covers only the team's own work.
 - **`team` finds the team by its name and its folder**, so two projects with the same folder name
   never share a team.
 - **`team` knows who runs it from the process tree**, not only from `HERDR_PANE_ID`, which any

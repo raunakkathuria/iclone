@@ -15,6 +15,8 @@ import {
 const HOOK = fileURLToPath(new URL('./hook.mjs', import.meta.url));
 const FAKE_HERDR = fileURLToPath(new URL('../test/fake-herdr.cjs', import.meta.url));
 const URL_ = 'https://github.com/example/repro/pull/1';
+// Git's tree with no files: the base of a first review that covers everything.
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 // A builder pane running codex and a reviewer pane running claude, in workspace wV.
 const PANES = () => [
@@ -35,7 +37,7 @@ function workerFixture(t) {
   const apiFile = join(dir, 'api');
   writeFileSync(join(bin, 'gh'), `#!${process.execPath}\nconst fs=require('node:fs');
 const args=process.argv.slice(2);
-if(args[0]==='pr') console.log(JSON.stringify({url:${JSON.stringify(URL_)},number:1,state:'OPEN',createdAt:new Date().toISOString(),headRefName:'feat/repro'}));
+if(args[0]==='pr'){let head='none';try{head=require('node:child_process').execSync('git rev-parse HEAD',{stdio:['ignore','pipe','ignore']}).toString().trim();}catch{}console.log(JSON.stringify({url:${JSON.stringify(URL_)},number:1,state:'OPEN',createdAt:new Date().toISOString(),headRefName:'feat/repro',headRefOid:process.env.FAKE_PR_HEAD||head}));}
 else { const n=fs.existsSync(${JSON.stringify(apiFile)})?Number(fs.readFileSync(${JSON.stringify(apiFile)},'utf8')):0; fs.writeFileSync(${JSON.stringify(apiFile)},String(n+1)); console.log(JSON.stringify(n?[{submitted_at:'2026-01-01',html_url:${JSON.stringify(URL_ + '#pullrequestreview-1')}}]:[])); }
 `, { mode: 0o755 });
   const herdr = () => JSON.parse(readFileSync(herdrState, 'utf8'));
@@ -249,8 +251,9 @@ test('herdr-review sends the local diff to the reviewer, and the findings file b
   const log = fixture.run('ok', { kind: 'local', event: { cwd: repo } });
   assert.match(log, /review by claude in wV:p2/);
   const review = fixture.prompts('wV:p2').find((p) => p.startsWith('Review the local changes'));
-  // No remote, so the base is HEAD: the review covers the uncommitted change. Git gives the real path.
-  assert.ok(review.includes(`git -C ${realpathSync(repo)} diff HEAD`), review);
+  // No remote and one commit, so the first review covers everything, committed or not, and
+  // never .team/. Git gives the real path.
+  assert.match(review, new RegExp(`git -C ${realpathSync(repo)} diff ${EMPTY_TREE} [0-9a-f]{40} -- \\. ':\\(exclude\\)\\.team'`));
   const [file] = readdirSync(fixture.findings);
   assert.equal(readFileSync(join(fixture.findings, file), 'utf8'), 'No findings.\n');
   const fix = fixture.prompts('wV:p1').find((p) => p.startsWith('claude reviewed your local changes'));
@@ -258,11 +261,16 @@ test('herdr-review sends the local diff to the reviewer, and the findings file b
   assert.match(fix, /Do not run herdr-review for these fixes/);
 });
 
-test('herdr-review with no changes, or outside git, does nothing', t => {
+test('with nothing new since the last review, herdr-review tells the coder; outside git it does nothing', t => {
   const fixture = workerFixture(t);
   const repo = gitRepo(fixture.dir);
-  execFileSync('git', ['-C', repo, 'checkout', '--', '.']);
-  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: repo } }), /skip herdr-review in .*: no changes/);
+  fixture.run('ok', { kind: 'local', event: { cwd: repo } });
+  // A change in .team/ alone is the minions' record, not work to review.
+  mkdirSync(join(repo, '.team'));
+  writeFileSync(join(repo, '.team', 'BOARD.md'), '| T-1 | DOING |\n');
+  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: repo } }), /skip herdr-review in .*: nothing new since [0-9a-f]{40}/);
+  assert.equal(fixture.prompts('wV:p2').length, 0);
+  assert.match(fixture.prompts('wV:p1').at(-1), /^herdr-review found nothing new to review in .*: nothing changed since the last review\.$/);
   assert.match(fixture.run('ok', { kind: 'local', event: { cwd: fixture.findings.replace('findings', 'bin') } }), /not a git repository/);
   assert.equal(fixture.prompts().length, 0);
 });
@@ -330,31 +338,73 @@ function branchRepo(dir) {
   return { repo, base };
 }
 
-test('a review covers the branch, but in a minion team only the uncommitted task', t => {
-  const pair = workerFixture(t);
-  const one = branchRepo(pair.dir);
-  pair.run('ok', { kind: 'local', event: { cwd: one.repo } });
-  const pairReview = pair.prompts('wV:p2').find((p) => p.startsWith('Review the local changes'));
-  assert.ok(pairReview.includes(`diff ${one.base}`), pairReview);
-  assert.doesNotMatch(pairReview, /handoff file/);
-
-  const team = workerFixture(t);
-  const two = branchRepo(team.dir);
-  team.run('ok', { kind: 'local', event: { cwd: two.repo }, workspaces: [{ workspace_id: 'wV', label: 'repo minions' }] });
-  const teamReview = team.prompts('wV:p2').find((p) => p.startsWith('Review the local changes'));
-  assert.ok(teamReview.includes(`git -C ${realpathSync(two.repo)} diff HEAD`), teamReview);
-  // The builder's notes for the reviewer are in the task's handoff file.
-  assert.match(teamReview, /\.team\/handoffs\/ of the task in REVIEW/);
+test('each review starts where the last one ended, in a pair and in a team', t => {
+  for (const workspaces of [[], [{ workspace_id: 'wV', label: 'repo minions' }]]) {
+    const fixture = workerFixture(t);
+    const { repo, base } = branchRepo(fixture.dir);
+    fixture.run('ok', { kind: 'local', event: { cwd: repo }, workspaces });
+    const first = fixture.prompts('wV:p2').find((p) => p.startsWith('Review the local changes'));
+    // The first review starts where the branch left origin/main, committed work included.
+    assert.ok(first.includes(` diff ${base} `), first);
+    const reviewed = / diff [0-9a-f]{40} ([0-9a-f]{40}) /.exec(first)[1];
+    writeFileSync(join(repo, 'b.txt'), 'new\n');
+    fixture.run('ok', { kind: 'local', event: { cwd: repo }, workspaces });
+    const second = fixture.prompts('wV:p2').find((p) => p.startsWith('Review the local changes'));
+    assert.ok(second.includes(` diff ${reviewed} `), second);
+    // In a team, the reviewer first reads the builder's notes in the task's handoff file.
+    assert.equal(/handoffs\/ of the task in REVIEW/.test(second), workspaces.length > 0);
+  }
 });
 
-test('in a minion team, herdr-review with nothing uncommitted tells the builder', t => {
+test('with no remote, work committed on a branch is reviewed from where it left main', t => {
   const fixture = workerFixture(t);
-  const { repo } = branchRepo(fixture.dir);
-  execFileSync('git', ['-C', repo, 'checkout', '--', '.']);
-  const log = fixture.run('ok', { kind: 'local', event: { cwd: repo }, workspaces: [{ workspace_id: 'wV', label: 'repo minions' }] });
-  assert.match(log, /no changes/);
-  assert.equal(fixture.prompts('wV:p2').length, 0);
-  assert.match(fixture.prompts('wV:p1').at(-1), /^herdr-review found nothing to review in .*commit a task only after qa-minion passes it/);
+  const repo = gitRepo(fixture.dir);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  const fork = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '-b', 'feature');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'work');
+  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: repo } }), /review done:/);
+  assert.ok(fixture.prompts('wV:p2').find((p) => p.startsWith('Review the local changes')).includes(` diff ${fork} `));
+});
+
+test('herdr-review reviews the open PR when all the work is pushed to it, and the local work otherwise', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  git('remote', 'add', 'origin', 'https://github.com/example/repro.git');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'work');
+  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: repo } }), /review done: .*pullrequestreview/);
+  assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review pull request')));
+  // Work that is not pushed yet is reviewed locally.
+  writeFileSync(join(repo, 'a.txt'), 'three\n');
+  fixture.run('ok', { kind: 'local', event: { cwd: repo } });
+  assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review the local changes')));
+});
+
+test('a commit that is not on the PR yet is reviewed locally', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  git('remote', 'add', 'origin', 'https://github.com/example/repro.git');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'not pushed');
+  fixture.run('ok', { kind: 'local', event: { cwd: repo }, env: { FAKE_PR_HEAD: '0'.repeat(40) } });
+  assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review the local changes')));
+  assert.ok(!fixture.prompts('wV:p2').some((p) => p.startsWith('Review pull request')));
+});
+
+test('a PR review is remembered as the PR commit on its branch, not as the checkout', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  git('checkout', '-q', '-b', 'feat/repro');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'the PR');
+  // Work the PR does not have.
+  writeFileSync(join(repo, 'extra.txt'), 'not in the PR\n');
+  fixture.run('ok', { event: { cwd: repo } });
+  assert.equal(git('rev-parse', 'refs/herdr/reviewed/feat/repro'), git('rev-parse', 'HEAD^{tree}'));
+  // So that work is still reviewed next time.
+  fixture.run('ok', { kind: 'local', event: { cwd: repo } });
+  assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review the local changes')));
 });
 
 test('a PR made after cd names that checkout in the review prompt', t => {
@@ -395,16 +445,9 @@ test('a git failure is reported as an error, not as "no changes" or "not a git r
   chmodSync(index, 0o000);
   let log;
   try { log = fixture.run('ok', { kind: 'local', event: { cwd: repo } }); } finally { chmodSync(index, 0o644); }
-  assert.match(log, /error: Error: git diff failed in /);
+  assert.match(log, /error: Error: git snapshot failed in /);
   assert.doesNotMatch(log, /not a git repository|no changes/);
   assert.ok(fixture.notified('Review handoff failed'));
-});
-
-test('the same local diff is reviewed once', t => {
-  const fixture = workerFixture(t);
-  const repo = gitRepo(fixture.dir);
-  fixture.run('ok', { kind: 'local', event: { cwd: repo } });
-  assert.match(fixture.run('ok', { kind: 'local', event: { cwd: repo } }), /already handed off/);
 });
 
 // Runs the session hook with a fake herdr where the caller pane has the given label.
@@ -462,6 +505,12 @@ test('isReviewRequest matches herdr-review where a command starts', () => {
   assert.equal(isReviewRequest({ tool_name: 'shell', tool_input: { command: 'cd app && herdr-review' } }), true);
   assert.equal(isReviewRequest({ tool_name: 'Shell', tool_input: { command: 'echo "run herdr-review later"' } }), false);
   assert.equal(isReviewRequest({ tool_name: 'Write', tool_input: { command: 'herdr-review' } }), false);
+  // A "|" or "(" inside a quoted argument is part of the argument, not a new command.
+  assert.equal(isReviewRequest({ tool_name: 'Bash', tool_input: { command: 'grep "w14:p1\\|herdr-review in" log' } }), false);
+  assert.equal(isReviewRequest({ tool_name: 'Bash', tool_input: { command: "grep -E '(herdr-review sends|x)' f" } }), false);
+  assert.equal(isReviewRequest({ tool_name: 'Bash', tool_input: { command: 'cd "my dir" && echo "it\'s" && herdr-review' } }), true);
+  assert.equal(isPrCreate({ tool_name: 'Bash', tool_input: { command: 'gh pr create --title "a|b"' } }), true);
+  assert.equal(isPrCreate({ tool_name: 'Bash', tool_input: { command: 'echo "x && gh pr create"' } }), false);
   assert.equal(commandDir('cd app && herdr-review', '/repo', /(?:^|[;&|(]|\n)\s*herdr-review\b/), '/repo/app');
 });
 
@@ -481,9 +530,9 @@ test('Kiro and Cursor events count: tool names and output fields', () => {
 });
 
 test('the local review prompts name the repository, the base and the findings file', () => {
-  const local = { root: '/repo', base: 'abc123', file: '/tmp/herdr-review/1-x.md' };
+  const local = { root: '/repo', base: 'abc123', tree: 'def456', file: '/tmp/herdr-review/1-x.md' };
   const review = localReviewPrompt(local);
-  assert.match(review, /git -C \/repo diff abc123/);
+  assert.match(review, /git -C \/repo diff abc123 def456 -- \. ':\(exclude\)\.team'/);
   assert.match(review, /Do not edit/);
   assert.match(review, /The only file you write is \/tmp\/herdr-review\/1-x\.md/);
   assert.doesNotMatch(review, /\n/);

@@ -21,9 +21,17 @@ boss. See [team/README.md](team/README.md).
    and `reviewer` get the new labels then too.
 2. **The builder opens a PR** with `gh pr create`. A hook sees the command and sends the PR to the
    reviewer pane. The reviewer posts one review on the PR, with findings ranked P0 to P3.
-3. **The builder finishes local work with no PR.** At the start of each session, the builder is
-   told to run `herdr-review` as its last step. The hook sees that command and sends the local `git diff`
-   to the reviewer. The reviewer writes its findings to a file in `/tmp/herdr-review/`.
+3. **The builder finishes other work.** At the start of each session, the builder is told to run
+   `herdr-review` as its last step. The hook sees that command and picks the review:
+   - **Nothing changed since the last review:** the builder is told so, and no review starts.
+   - **The branch has an open PR, with all the work pushed:** the PR is reviewed, as in step 2.
+   - **Otherwise:** a local review of everything changed since the last review, committed or not.
+     This works with no git remote too. The reviewer writes its findings to a file in
+     `/tmp/herdr-review/`.
+
+   The hook remembers what each review covered, per folder and branch. A first review starts where
+   the branch left `main` (on the remote, or the local `main` when there is no remote). `.team/` is
+   never reviewed: it is the minions' record, not the project's work.
 4. **Back to the builder.** When the builder is free, it gets a prompt to fix the findings. For a PR it
    also pushes and replies on the PR with what it fixed and what it did not.
 
@@ -78,7 +86,7 @@ reviewer yourself. A team can also set each minion's model and effort: see
 
 - Only `gh pr create` and `herdr-review` start a review. Fixes are not reviewed again.
 - Work from any pane but the builder's gets no review.
-- The same PR, or the same local diff, is reviewed once.
+- A PR is reviewed once per commit, and local work once per change.
 - At most 3 reviews per builder pane per hour. Then Herdr shows "Review loop paused". Set
   `PR_REVIEW_MAX_PER_HOUR` to change the limit.
 

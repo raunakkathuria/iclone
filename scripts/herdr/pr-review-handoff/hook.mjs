@@ -15,12 +15,15 @@
 // It starts a review after two shell commands:
 //   gh pr create   The reviewer posts one review on the PR. The coder then fixes the findings,
 //                  pushes, and replies on the PR.
-//   herdr-review   For local work with no PR. The reviewer writes its findings to a file in
-//                  /tmp/herdr-review/, and the coder fixes them.
+//   herdr-review   When the branch has an open PR with everything pushed: the same PR review.
+//                  Otherwise a local review of everything changed since the last review,
+//                  committed or not, with or without a remote. The reviewer writes its findings
+//                  to a file in /tmp/herdr-review/, and the coder fixes them. With nothing new
+//                  since the last review, the coder is told so.
 //
 // The hook returns at once. The work runs in a detached process, outside the agent's sandbox.
 // Log: ~/.local/state/pr-review-handoff/log. Errors also appear as Herdr notifications.
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -30,10 +33,12 @@ import {
   CLEAR_COMMAND, SEATS, STATE_DIR, agentReady, ensureLayout, herdr, isTeam, loadConfig, log, notify, roleOf,
   sendPrompt, sleep, waitReady, withLock,
 } from '../lib/herdr.mjs';
+import { NOT_REVIEWED, changedBetween, currentBranch, git, gitRoot, markReviewed, reviewBase, snapshot } from '../lib/git.mjs';
 
 // Shell tool names: Claude Code and Codex "Bash", Cursor "Shell", Kiro V2 "shell", Kiro V3 "execute_bash".
 const SHELL_TOOLS = new Set(['Bash', 'Shell', 'shell', 'execute_bash']);
-// Only where a command starts, so "gh pr create" inside a quote or a comment does not count.
+// Only where a command starts, so "gh pr create" in a comment does not count. Quoted text is
+// blanked first (see withoutQuotes), so it does not count either.
 const GH_PR_CREATE = /(?:^|[;&|(]|\n)\s*gh\s+pr\s+create\b/;
 const HERDR_REVIEW = /(?:^|[;&|(]|\n)\s*herdr-review\b/;
 // Every coding tool may write here, even in a sandbox. PR_HANDOFF_FINDINGS_DIR is for tests.
@@ -55,8 +60,8 @@ const LOST_SETTLE_MS = Math.min(SETTLE_MS, 30_000);
 // What the coder is told at the start of each session, so that it asks for a review when done.
 export const CODER_RULE = [
   'You work in a Herdr workspace as the coder, in the pane labelled "builder-minion". A reviewer agent runs in the pane labelled "reviewer-minion".',
-  'When you finish a change and do not open a pull request, run `herdr-review` from the repository folder as your last step, then stop.',
-  'It sends your local changes to the reviewer, and the findings come back to you as a new prompt.',
+  'When you finish a change, run `herdr-review` from the repository folder as your last step, then stop.',
+  'It reviews everything you changed since the last review, committed or not; when your branch has an open pull request with all of it pushed, it reviews the pull request instead. The findings come back to you as a new prompt.',
   'A pull request you open with `gh pr create` goes to the reviewer on its own, so do not run `herdr-review` for it.',
   'Do not run `herdr-review` for fixes that a review asked for, and never when your task is to review work.',
 ].join(' ');
@@ -141,12 +146,34 @@ function shellCommand(event) {
   return SHELL_TOOLS.has(event?.tool_name) && typeof command === 'string' ? withoutHeredocs(command) : null;
 }
 
+// The command with the text inside each quoted string, and each escaped character, turned into
+// spaces. Quotes stay, and so does the length, so a position here is the same in the command.
+// A quoted argument is never a command: in grep "a\|herdr-review" the "|" is part of the
+// pattern. Neither is an escaped character: in grep a\|herdr-review the "|" is not a pipe.
+export function withoutQuotes(command) {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    const escaped = c === '\\' && i + 1 < command.length && quote !== "'";
+    if (escaped) { out += '  '; i++; continue; }
+    if (quote) {
+      if (c === quote) quote = null;
+      out += c === "'" || c === '"' ? c : ' ';
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    out += c;
+  }
+  return out;
+}
+
 export function isPrCreate(event) {
-  return GH_PR_CREATE.test(shellCommand(event) ?? '');
+  return GH_PR_CREATE.test(withoutQuotes(shellCommand(event) ?? ''));
 }
 
 export function isReviewRequest(event) {
-  return HERDR_REVIEW.test(shellCommand(event) ?? '');
+  return HERDR_REVIEW.test(withoutQuotes(shellCommand(event) ?? ''));
 }
 
 // The folder the command ran in. Cursor sends an empty cwd, so fall back to its tool input and
@@ -156,13 +183,17 @@ export function eventDir(event, env = {}) {
 }
 
 // The folder a command ran in: the event's folder, changed by a "cd X &&" before it.
+// The command and each cd are found where quoted text is blanked, so a "cd" inside a quoted
+// argument does not count. Each cd's folder is then read from the command itself.
 export function commandDir(command, cwd, pattern = GH_PR_CREATE) {
-  const at = command.search(pattern);
-  const before = at >= 0 ? command.slice(0, at) : command;
+  const blank = withoutQuotes(command);
+  const at = blank.search(pattern);
+  const before = blank.slice(0, at >= 0 ? at : blank.length);
   let dir = cwd;
   // Each cd starts from where the one before it left off: "cd a && cd b" ends in a/b.
-  for (const [, cd] of before.matchAll(/(?:^|&&|;)\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g)) {
-    const next = unquote(cd).replace(/^~(?=\/|$)/, homedir());
+  for (const match of before.matchAll(/(?:^|&&|;)\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g)) {
+    const start = match.index + match[0].length - match[1].length;
+    const next = unquote(command.slice(start, start + match[1].length)).replace(/^~(?=\/|$)/, homedir());
     dir = isAbsolute(next) ? next : join(dir, next);
   }
   return dir;
@@ -256,11 +287,14 @@ export function fixPrompt(pr, reviewUrl, reviewer) {
   ].join(' ');
 }
 
-export function localReviewPrompt({ root, base, file, team = false }) {
+// The pathspec that leaves .team/ out, as the reviewer types it in a shell.
+const NOT_REVIEWED_ARGS = NOT_REVIEWED.map((arg) => (arg === '.' ? arg : `'${arg}'`)).join(' ');
+
+export function localReviewPrompt({ root, base, tree, file, team = false }) {
   return [
-    `Review the local changes in the git repository ${root}. They have no pull request.`,
+    `Review the local changes in the git repository ${root}.`,
     ...reviewerRules(root, team),
-    `See the changes with git -C ${root} status and git -C ${root} diff ${base}. Read new untracked files too.`,
+    `See them with git -C ${root} diff ${base} ${tree} -- ${NOT_REVIEWED_ARGS}. They are everything changed since the last review, committed or not, new files included. Read the files in ${root} for context.`,
     'Check correctness, security, tests, and fit with the project rules.',
     `Do not edit, commit or push anything. The only file you write is ${file}.`,
     FINDINGS,
@@ -292,7 +326,7 @@ async function findPr(dir, head) {
   // GitHub can take a moment to show a new PR, so try a few times.
   for (let i = 0; i < 4; i++) {
     try {
-      const args = ['pr', 'view', ...(head ? [head] : []), '--json', 'number,url,state,createdAt,headRefName'];
+      const args = ['pr', 'view', ...(head ? [head] : []), '--json', 'number,url,state,createdAt,headRefName,headRefOid'];
       return JSON.parse(execFileSync('gh', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     } catch { await sleep(3000); }
   }
@@ -310,52 +344,6 @@ export function reviews(pr) {
       .sort((a, b) => a.submitted_at.localeCompare(b.submitted_at));
     return { count: items.length, newest: items.at(-1)?.html_url ?? null };
   } catch { return null; }
-}
-
-const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args],
-  { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }).trim();
-
-// The top folder of the git checkout that holds dir, or null when dir is not in one.
-function gitRoot(dir) {
-  try { return git(dir, 'rev-parse', '--show-toplevel'); } catch { return null; }
-}
-
-// Feeds a git command's output into a hash as it arrives, so a large diff never sits in memory.
-function hashGit(root, args, hash, input = null) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', ['-C', root, ...args], { stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
-    let stderr = '';
-    child.stdout.on('data', (chunk) => hash.update(chunk));
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`git ${args[0]} failed in ${root}: ${stderr.trim()}`))));
-    if (input !== null) child.stdin.end(input);
-  });
-}
-
-// The local changes to review: everything since the branch left the remote's default branch,
-// committed or not, and untracked files. In a minion team, only what is not committed yet: the
-// builder commits each task after QA passes it, so this is the task in review, not the branch.
-// Null when there is nothing to review. The hash covers the diff and the content of each
-// untracked file, so any new change gets a new review.
-// A git failure throws: it is reported, never taken for "no changes".
-async function localChanges(root, team = false) {
-  let base = 'HEAD';
-  for (const ref of team ? [] : ['origin/HEAD', 'origin/main', 'origin/master']) {
-    try { base = git(root, 'merge-base', 'HEAD', ref); break; } catch { /* no such ref */ }
-  }
-  const quiet = spawnSync('git', ['-C', root, 'diff', '--quiet', base], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
-  if (quiet.status !== 0 && quiet.status !== 1) throw new Error(`git diff failed in ${root}: ${(quiet.stderr || quiet.error?.message || '').trim()}`);
-  const untracked = git(root, 'ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean);
-  if (quiet.status === 0 && !untracked.length) return null;
-  const hash = createHash('sha1');
-  await hashGit(root, ['diff', '--binary', base], hash);
-  if (untracked.length) {
-    hash.update(untracked.join('\0'));
-    // git hash-object prints one ID per file, made from the file's content.
-    await hashGit(root, ['hash-object', '--stdin-paths'], hash, `${untracked.join('\n')}\n`);
-  }
-  return { base, hash: hash.digest('hex') };
 }
 
 // Reserves a review. Returns false when another worker already reserved it.
@@ -436,7 +424,8 @@ async function getReviewer(builder) {
 }
 
 // Sends one review to the reviewer pane and hands the result back to the coder.
-// job: { builder, builderTool, slotKey, key, token, title, prompt, before(), after(before), fix(result, reviewer) }
+// job: { builder, builderTool, slotKey, key, token, title, prompt, before(), after(before), fix(result, reviewer),
+//        onDone() when the review is done }
 async function runReview(job) {
   const socket = process.env.HERDR_SOCKET_PATH;
   const lockKey = `review-${createHash('sha1').update(`${socket}|${job.builder.workspace_id}`).digest('hex')}`;
@@ -503,7 +492,10 @@ async function runReview(job) {
     throw error;
   }
   // Outside the lock: waiting for a busy coder must not hold up other reviews.
-  if (result) await handBack(job, result, reviewer.tool);
+  if (result) {
+    job.onDone?.();
+    await handBack(job, result, reviewer.tool);
+  }
 }
 
 // Waits up to firstMs for the review result while the reviewer looks ready. Whenever the
@@ -537,7 +529,11 @@ async function handBack(job, result, reviewerTool) {
     return log(`${job.key}: coder ${pane} has no agent; not handed back`);
   }
   const who = `${current.agent} coder`;
-  if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${job.key}: coder ${pane} busy for 3 hours; not handed back`);
+  if (!(await waitReady(pane, who, 180 * MINUTE))) {
+    // Only logging this lost a whole review once: Guru is told where the findings are.
+    notify(`Review done: ${job.title}`, `The coder in pane ${pane} was busy for 3 hours, so it was not told. The findings: ${result}`);
+    return log(`${job.key}: coder ${pane} busy for 3 hours; not handed back`);
+  }
   if (!(await sendPrompt(pane, job.fix(result, reviewerTool)))) {
     notify(`${who} did not start`, `Ask pane ${pane} to fix the review yourself: ${result}`);
     return log(`${job.key}: fix prompt to ${pane} stalled 3 times`);
@@ -581,16 +577,56 @@ function teamWorkspace(workspace) {
   try { return isTeam(herdr('workspace', 'get', workspace).workspace?.label); } catch { return false; }
 }
 
-// In a team, the builder waits for the findings of its herdr-review. With nothing uncommitted
-// there is nothing to review, so it is told; otherwise it would wait for ever.
-async function nothingToReview(event, root) {
-  const builder = resolveBuilder(event);
-  // Only the builder waits for findings; another minion's herdr-review is only noise.
-  if (![null, 'builder'].includes(roleOf(builder.label)) || SEATS.has(builder.label)) return;
-  const pane = builder.pane_id;
-  const text = `herdr-review found nothing to review in ${root}: there are no uncommitted changes. In a minion team a review covers only the work that is not committed yet, so commit a task only after qa-minion passes it.`;
-  if (await waitReady(pane, 'builder', 30 * MINUTE)) await sendPrompt(pane, text);
+// The coder waits for the findings of its herdr-review, so it is told when there is nothing new to
+// review; otherwise it would wait for ever. Only a builder pane is told, never another minion.
+async function nothingNew(event, root) {
+  const pane = resolveBuilder(event);
+  const role = roleOf(pane.label) ?? (SEATS.has(pane.label) ? pane.label : null);
+  if (role && role !== 'builder') return;
+  const text = `herdr-review found nothing new to review in ${root}: nothing changed since the last review.`;
+  if (await waitReady(pane.pane_id, 'builder', 30 * MINUTE)) await sendPrompt(pane.pane_id, text);
 }
+
+// The open PR of the checkout's branch, when everything here is committed and pushed to it; else
+// null. Then herdr-review reviews the PR, and the findings go on GitHub. With no remote, never.
+function pushedPr(root) {
+  try {
+    if (!git(root, 'remote')) return null;
+    if (git(root, 'status', '--porcelain', '--', ...NOT_REVIEWED)) return null;
+    const pr = JSON.parse(execFileSync('gh', ['pr', 'view', '--json', 'number,url,state,createdAt,headRefName,headRefOid'],
+      { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+    return pr.state === 'OPEN' && pr.headRefOid === git(root, 'rev-parse', 'HEAD') ? pr : null;
+  } catch { return null; }
+}
+
+// One review of a PR at its newest commit, so a PR is reviewed again only after new commits.
+async function reviewPr(tool, event, pr, root, onDone) {
+  const job = await prepare(tool, event, `${pr.url}@${pr.headRefOid}`, `PR #${pr.number}`);
+  if (!job) return;
+  await runReview({
+    ...job,
+    prompt: reviewPrompt(pr, root, teamWorkspace(process.env.HERDR_WORKSPACE_ID)),
+    before: () => reviews(pr),
+    // A new review on the PR proves the review happened. Plain comments do not count.
+    after: (before) => {
+      const now = reviews(pr);
+      return before && now && now.count > before.count ? now.newest : null;
+    },
+    fix: (reviewUrl, reviewer) => fixPrompt(pr, reviewUrl, reviewer),
+    onDone,
+  });
+}
+
+// Remembers what a finished review covered, so the next local review starts there.
+const remember = (root, tree, branch) => () => {
+  try { markReviewed(root, tree, branch); } catch (e) { log(`could not remember the review of ${root}: ${e.message}`); }
+};
+
+// What a PR review covered: the PR's own commit, on the PR's branch. Not the checkout, which can
+// hold work the PR does not have, or be on another branch after the command.
+const rememberPr = (root, pr) => () => {
+  try { remember(root, git(root, 'rev-parse', `${pr.headRefOid}^{tree}`), pr.headRefName)(); } catch (e) { log(`could not remember the review of ${pr.url}: ${e.message}`); }
+};
 
 async function prWorker(tool, event) {
   const command = withoutHeredocs(event.tool_input.command);
@@ -606,33 +642,27 @@ async function prWorker(tool, event) {
   if (!sameBranch(head, pr.headRefName)) return log(`skip ${pr.url}: its branch ${pr.headRefName} is not ${head}`);
   const age = (Date.now() - Date.parse(pr.createdAt)) / 1000;
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
-  const job = await prepare(tool, event, pr.url, `PR #${pr.number}`);
-  if (!job) return;
-  await runReview({
-    ...job,
-    prompt: reviewPrompt(pr, gitRoot(dir) ?? dir, teamWorkspace(process.env.HERDR_WORKSPACE_ID)),
-    before: () => reviews(pr),
-    // A new review on the PR proves the review happened. Plain comments do not count.
-    after: (before) => {
-      const now = reviews(pr);
-      return before && now && now.count > before.count ? now.newest : null;
-    },
-    fix: (reviewUrl, reviewer) => fixPrompt(pr, reviewUrl, reviewer),
-  });
+  const root = gitRoot(dir);
+  // A later local review starts after what this PR review covers.
+  await reviewPr(tool, event, pr, root ?? dir, root ? rememberPr(root, pr) : null);
 }
 
+// herdr-review: nothing new, the PR, or the local changes, in that order.
 async function localWorker(tool, event) {
   const dir = commandDir(withoutHeredocs(event.tool_input.command), eventDir(event, process.env), HERDR_REVIEW);
   const root = gitRoot(dir);
   if (!root) return log(`skip herdr-review in ${dir}: not a git repository`);
-  const team = teamWorkspace(process.env.HERDR_WORKSPACE_ID);
-  const changes = await localChanges(root, team);
-  if (!changes) {
-    if (team) await nothingToReview(event, root);
-    return log(`skip herdr-review in ${root}: no changes`);
+  const branch = currentBranch(root);
+  const tree = snapshot(root);
+  const base = reviewBase(root, branch);
+  if (!changedBetween(root, base, tree)) {
+    log(`skip herdr-review in ${root}: nothing new since ${base}`);
+    return nothingNew(event, root);
   }
-  const local = { root, team, ...changes, file: join(FINDINGS_DIR, `${Date.now()}-${changes.hash.slice(0, 8)}.md`) };
-  const job = await prepare(tool, event, `local:${local.root}:${local.hash}`, `local changes in ${local.root.split('/').at(-1)}`);
+  const pr = pushedPr(root);
+  if (pr) return reviewPr(tool, event, pr, root, rememberPr(root, pr));
+  const local = { root, base, tree, team: teamWorkspace(process.env.HERDR_WORKSPACE_ID), file: join(FINDINGS_DIR, `${Date.now()}-${tree.slice(0, 8)}.md`) };
+  const job = await prepare(tool, event, `local:${root}:${tree}`, `local changes in ${root.split('/').at(-1)}`);
   if (!job) return;
   mkdirSync(FINDINGS_DIR, { recursive: true });
   await runReview({
@@ -641,6 +671,7 @@ async function localWorker(tool, event) {
     before: () => null,
     after: () => (existsSync(local.file) && statSync(local.file).size > 0 ? local.file : null),
     fix: (file, reviewer) => localFixPrompt({ ...local, file }, reviewer),
+    onDone: remember(root, tree, branch),
   });
 }
 
