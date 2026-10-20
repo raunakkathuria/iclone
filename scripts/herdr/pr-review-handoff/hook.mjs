@@ -146,19 +146,22 @@ function shellCommand(event) {
   return SHELL_TOOLS.has(event?.tool_name) && typeof command === 'string' ? withoutHeredocs(command) : null;
 }
 
-// The command with the text inside each quoted string removed, quotes kept. A quoted argument
-// is never a command: in grep "a\|herdr-review" the "|" is part of the pattern.
+// The command with the text inside each quoted string, and each escaped character, turned into
+// spaces. Quotes stay, and so does the length, so a position here is the same in the command.
+// A quoted argument is never a command: in grep "a\|herdr-review" the "|" is part of the
+// pattern. Neither is an escaped character: in grep a\|herdr-review the "|" is not a pipe.
 export function withoutQuotes(command) {
   let out = '';
   let quote = null;
   for (let i = 0; i < command.length; i++) {
     const c = command[i];
+    const escaped = c === '\\' && i + 1 < command.length && quote !== "'";
+    if (escaped) { out += '  '; i++; continue; }
     if (quote) {
-      if (c === '\\' && quote === '"') i++;
-      else if (c === quote) { quote = null; out += c; }
+      if (c === quote) quote = null;
+      out += c === "'" || c === '"' ? c : ' ';
       continue;
     }
-    if (c === '\\') { out += c + (command[i + 1] ?? ''); i++; continue; }
     if (c === "'" || c === '"') quote = c;
     out += c;
   }
@@ -180,13 +183,17 @@ export function eventDir(event, env = {}) {
 }
 
 // The folder a command ran in: the event's folder, changed by a "cd X &&" before it.
+// The command and each cd are found where quoted text is blanked, so a "cd" inside a quoted
+// argument does not count. Each cd's folder is then read from the command itself.
 export function commandDir(command, cwd, pattern = GH_PR_CREATE) {
-  const at = command.search(pattern);
-  const before = at >= 0 ? command.slice(0, at) : command;
+  const blank = withoutQuotes(command);
+  const at = blank.search(pattern);
+  const before = blank.slice(0, at >= 0 ? at : blank.length);
   let dir = cwd;
   // Each cd starts from where the one before it left off: "cd a && cd b" ends in a/b.
-  for (const [, cd] of before.matchAll(/(?:^|&&|;)\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g)) {
-    const next = unquote(cd).replace(/^~(?=\/|$)/, homedir());
+  for (const match of before.matchAll(/(?:^|&&|;)\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g)) {
+    const start = match.index + match[0].length - match[1].length;
+    const next = unquote(command.slice(start, start + match[1].length)).replace(/^~(?=\/|$)/, homedir());
     dir = isAbsolute(next) ? next : join(dir, next);
   }
   return dir;
@@ -285,7 +292,7 @@ const NOT_REVIEWED_ARGS = NOT_REVIEWED.map((arg) => (arg === '.' ? arg : `'${arg
 
 export function localReviewPrompt({ root, base, tree, file, team = false }) {
   return [
-    `Review the local changes in the git repository ${root}. They have no pull request.`,
+    `Review the local changes in the git repository ${root}.`,
     ...reviewerRules(root, team),
     `See them with git -C ${root} diff ${base} ${tree} -- ${NOT_REVIEWED_ARGS}. They are everything changed since the last review, committed or not, new files included. Read the files in ${root} for context.`,
     'Check correctness, security, tests, and fit with the project rules.',
@@ -615,6 +622,12 @@ const remember = (root, tree, branch) => () => {
   try { markReviewed(root, tree, branch); } catch (e) { log(`could not remember the review of ${root}: ${e.message}`); }
 };
 
+// What a PR review covered: the PR's own commit, on the PR's branch. Not the checkout, which can
+// hold work the PR does not have, or be on another branch after the command.
+const rememberPr = (root, pr) => () => {
+  try { remember(root, git(root, 'rev-parse', `${pr.headRefOid}^{tree}`), pr.headRefName)(); } catch (e) { log(`could not remember the review of ${pr.url}: ${e.message}`); }
+};
+
 async function prWorker(tool, event) {
   const command = withoutHeredocs(event.tool_input.command);
   const dir = commandDir(command, eventDir(event, process.env));
@@ -631,8 +644,7 @@ async function prWorker(tool, event) {
   if (pr.state !== 'OPEN' || age > MAX_PR_AGE_SECONDS) return log(`skip ${pr.url}: state ${pr.state}, ${Math.round(age)}s old`);
   const root = gitRoot(dir);
   // A later local review starts after what this PR review covers.
-  const onDone = root ? remember(root, snapshot(root), currentBranch(root)) : null;
-  await reviewPr(tool, event, pr, root ?? dir, onDone);
+  await reviewPr(tool, event, pr, root ?? dir, root ? rememberPr(root, pr) : null);
 }
 
 // herdr-review: nothing new, the PR, or the local changes, in that order.
@@ -647,9 +659,8 @@ async function localWorker(tool, event) {
     log(`skip herdr-review in ${root}: nothing new since ${base}`);
     return nothingNew(event, root);
   }
-  const onDone = remember(root, tree, branch);
   const pr = pushedPr(root);
-  if (pr) return reviewPr(tool, event, pr, root, onDone);
+  if (pr) return reviewPr(tool, event, pr, root, rememberPr(root, pr));
   const local = { root, base, tree, team: teamWorkspace(process.env.HERDR_WORKSPACE_ID), file: join(FINDINGS_DIR, `${Date.now()}-${tree.slice(0, 8)}.md`) };
   const job = await prepare(tool, event, `local:${root}:${tree}`, `local changes in ${root.split('/').at(-1)}`);
   if (!job) return;
@@ -660,7 +671,7 @@ async function localWorker(tool, event) {
     before: () => null,
     after: () => (existsSync(local.file) && statSync(local.file).size > 0 ? local.file : null),
     fix: (file, reviewer) => localFixPrompt({ ...local, file }, reviewer),
-    onDone,
+    onDone: remember(root, tree, branch),
   });
 }
 

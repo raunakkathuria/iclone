@@ -1,6 +1,6 @@
 // Run: node --test lib/herdr.test.mjs
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -127,6 +127,22 @@ test('tryLock takes over a lock whose owner has died', () => {
   // A lock held by a live process is not taken.
   assert.equal(tryLock('dead-lock'), null);
   release();
+});
+
+test('of many processes, only one takes over a lock whose owner died', async () => {
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  mkdirSync(join(STATE, 'locks', 'race-lock'), { recursive: true });
+  writeFileSync(join(STATE, 'locks', 'race-lock', 'owner'), String(dead));
+  const lib = fileURLToPath(new URL('./herdr.mjs', import.meta.url));
+  // Each process tries the lock at about the same time, and keeps what it got for 3 seconds.
+  const script = `import(${JSON.stringify(lib)}).then(async (m) => { process.stdout.write(m.tryLock('race-lock') ? '1' : '0'); await new Promise((r) => setTimeout(r, 3000)); });`;
+  const tries = Array.from({ length: 20 }, () => new Promise((done) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, PR_HANDOFF_STATE_DIR: STATE, HERDR_LOCK_TEST_DELAY_MS: '300' } });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('close', () => done(out));
+  }));
+  assert.equal((await Promise.all(tries)).filter((got) => got === '1').length, 1);
 });
 
 test('a new workspace gets a reviewer pane to the right, and both tools start', async t => {

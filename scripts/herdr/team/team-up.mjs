@@ -15,13 +15,14 @@
 // 5. Sends each new minion its first prompt: the "start" line in its file.
 // 6. Gives Guru two seats, when they are missing: a "guru" pane under the minions that runs
 //    team watch, and a "log" tab that shows every message.
-// A new team also marks the project as reviewed up to now, so its first review covers only
-// the team's own work, not the whole branch.
+// A project that was never reviewed is marked as reviewed up to now when its team starts, so
+// the team's first review covers only the team's own work, not the whole branch. A project
+// that was reviewed before keeps that mark: work since then is not reviewed yet.
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MINIONS, ensureLayout, findTeam, herdr, roleNote, sendPrompt, sleep, teamLabel, waitReady, whoCalls } from '../lib/herdr.mjs';
-import { gitRoot, markReviewed } from '../lib/git.mjs';
+import { gitRoot, lastReviewed, markReviewed } from '../lib/git.mjs';
 import { CORE, DEFAULT_EXTRAS, loadMinions, promptFile, readTeam, teamMembers } from '../lib/minions.mjs';
 import { LIMIT, PROMOTED, addLesson, promotedBodies } from './lessons.mjs';
 
@@ -136,7 +137,7 @@ async function main() {
     return;
   }
   const running = findTeam(root);
-  if (!running && gitRoot(root)) markReviewed(root);
+  if (!running && gitRoot(root) && !lastReviewed(root)) markReviewed(root);
   const ws = running?.workspace_id ?? herdr('workspace', 'create', '--cwd', root, '--label', teamLabel(root), '--no-focus').workspace.workspace_id;
   // A new team gets every first prompt; a running team only those of the minions it just gained.
   const starting = running ? added : members;

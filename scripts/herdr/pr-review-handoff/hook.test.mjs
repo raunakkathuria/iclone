@@ -37,7 +37,7 @@ function workerFixture(t) {
   const apiFile = join(dir, 'api');
   writeFileSync(join(bin, 'gh'), `#!${process.execPath}\nconst fs=require('node:fs');
 const args=process.argv.slice(2);
-if(args[0]==='pr'){let head='none';try{head=require('node:child_process').execSync('git rev-parse HEAD',{stdio:['ignore','pipe','ignore']}).toString().trim();}catch{}console.log(JSON.stringify({url:${JSON.stringify(URL_)},number:1,state:'OPEN',createdAt:new Date().toISOString(),headRefName:'feat/repro',headRefOid:head}));}
+if(args[0]==='pr'){let head='none';try{head=require('node:child_process').execSync('git rev-parse HEAD',{stdio:['ignore','pipe','ignore']}).toString().trim();}catch{}console.log(JSON.stringify({url:${JSON.stringify(URL_)},number:1,state:'OPEN',createdAt:new Date().toISOString(),headRefName:'feat/repro',headRefOid:process.env.FAKE_PR_HEAD||head}));}
 else { const n=fs.existsSync(${JSON.stringify(apiFile)})?Number(fs.readFileSync(${JSON.stringify(apiFile)},'utf8')):0; fs.writeFileSync(${JSON.stringify(apiFile)},String(n+1)); console.log(JSON.stringify(n?[{submitted_at:'2026-01-01',html_url:${JSON.stringify(URL_ + '#pullrequestreview-1')}}]:[])); }
 `, { mode: 0o755 });
   const herdr = () => JSON.parse(readFileSync(herdrState, 'utf8'));
@@ -377,6 +377,32 @@ test('herdr-review reviews the open PR when all the work is pushed to it, and th
   assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review pull request')));
   // Work that is not pushed yet is reviewed locally.
   writeFileSync(join(repo, 'a.txt'), 'three\n');
+  fixture.run('ok', { kind: 'local', event: { cwd: repo } });
+  assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review the local changes')));
+});
+
+test('a commit that is not on the PR yet is reviewed locally', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  git('remote', 'add', 'origin', 'https://github.com/example/repro.git');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'not pushed');
+  fixture.run('ok', { kind: 'local', event: { cwd: repo }, env: { FAKE_PR_HEAD: '0'.repeat(40) } });
+  assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review the local changes')));
+  assert.ok(!fixture.prompts('wV:p2').some((p) => p.startsWith('Review pull request')));
+});
+
+test('a PR review is remembered as the PR commit on its branch, not as the checkout', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  git('checkout', '-q', '-b', 'feat/repro');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'the PR');
+  // Work the PR does not have.
+  writeFileSync(join(repo, 'extra.txt'), 'not in the PR\n');
+  fixture.run('ok', { event: { cwd: repo } });
+  assert.equal(git('rev-parse', 'refs/herdr/reviewed/feat/repro'), git('rev-parse', 'HEAD^{tree}'));
+  // So that work is still reviewed next time.
   fixture.run('ok', { kind: 'local', event: { cwd: repo } });
   assert.ok(fixture.prompts('wV:p2').some((p) => p.startsWith('Review the local changes')));
 });

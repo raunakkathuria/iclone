@@ -408,7 +408,14 @@ test('a new team in a git project marks it as reviewed up to now', () => {
   // The team's first review starts here, not at the start of the branch.
   const marks = readdirSync(join(dir, 'state', 'reviewed'));
   assert.equal(marks.length, 1);
-  assert.match(readFileSync(join(dir, 'state', 'reviewed', marks[0]), 'utf8'), /"branch":"(main|master)","tree":"[0-9a-f]{40}"/);
+  const mark = () => readFileSync(join(dir, 'state', 'reviewed', marks[0]), 'utf8');
+  assert.match(mark(), /"branch":"(main|master)","tree":"[0-9a-f]{40}"/);
+  const first = mark();
+  assert.equal(run(TEAM, ['down'], app).code, 0);
+  // A team started again keeps the mark: work done since then is not reviewed yet.
+  writeFileSync(join(app, 'a.txt'), 'two\n');
+  assert.equal(run(TEAM_UP, [], app).code, 0);
+  assert.equal(mark(), first);
   assert.equal(run(TEAM, ['down'], app).code, 0);
 });
 

@@ -54,13 +54,14 @@ export function changedBetween(root, base, tree) {
 
 // Where the first review of a branch starts, the first rule that applies:
 // 1. where the branch left the remote's default branch (origin/HEAD, origin/main, origin/master);
-// 2. where it left the local main or master, when it is another branch;
-// 3. on the default branch with no remote, the commit before the last one: the last commit and
-//    any work not committed are reviewed;
+// 2. where it left the local main or master, when it is neither of them;
+// 3. on main or master with no remote, the commit before the last one: the last commit and any
+//    work not committed are reviewed;
 // 4. with one commit or none, the empty tree: everything is reviewed.
 export function firstBase(root, branch = currentBranch(root)) {
+  const onDefault = ['main', 'master'].includes(branch);
   for (const ref of ['origin/HEAD', 'origin/main', 'origin/master', 'main', 'master']) {
-    if (ref === branch) continue;
+    if (onDefault && !ref.startsWith('origin/')) continue;
     try { return git(root, 'merge-base', 'HEAD', ref); } catch { /* no such ref */ }
   }
   try { return git(root, 'rev-parse', '--verify', '-q', 'HEAD~1'); } catch { return EMPTY_TREE; }
@@ -69,8 +70,7 @@ export function firstBase(root, branch = currentBranch(root)) {
 const real = (dir) => { try { return realpathSync(dir); } catch { return dir; } };
 const markFile = (root, branch) => join(STATE_DIR, 'reviewed', `${createHash('sha1').update(`${real(root)}|${branch}`).digest('hex')}.json`);
 
-// The snapshot the last finished review of this folder and branch covered, or null. Git prunes
-// a snapshot nothing points to after about two weeks; then there is none.
+// The snapshot the last finished review of this folder and branch covered, or null.
 export function lastReviewed(root, branch = currentBranch(root)) {
   try {
     const { tree } = JSON.parse(readFileSync(markFile(root, branch), 'utf8'));
@@ -79,8 +79,10 @@ export function lastReviewed(root, branch = currentBranch(root)) {
   } catch { return null; }
 }
 
-// Records that a review covered this snapshot. The next review starts from it.
+// Records that a review covered this snapshot. The next review starts from it. A reference in
+// the repository keeps the snapshot: git deletes objects that nothing points to.
 export function markReviewed(root, tree = snapshot(root), branch = currentBranch(root)) {
+  git(root, 'update-ref', `refs/herdr/reviewed/${branch}`, tree);
   const file = markFile(root, branch);
   mkdirSync(join(STATE_DIR, 'reviewed'), { recursive: true });
   writeFileSync(file, `${JSON.stringify({ root: real(root), branch, tree, at: new Date().toISOString() })}\n`);

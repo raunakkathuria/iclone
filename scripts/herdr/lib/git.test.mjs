@@ -58,6 +58,13 @@ test('firstBase: where the branch left the remote, else the local main, else the
   commit('second');
   // Two commits, no remote: the last commit and the work not committed.
   assert.equal(firstBase(root), git('rev-parse', 'HEAD~1'));
+  // On main, a local master is not a base: it is the other name for the default branch.
+  const other = main === 'main' ? 'master' : 'main';
+  git('branch', other, 'HEAD~1');
+  writeFileSync(join(root, 'a.txt'), 'two and a half\n');
+  commit('two and a half');
+  assert.equal(firstBase(root), git('rev-parse', 'HEAD~1'));
+  git('branch', '-D', other);
   // Another branch, no remote: where it left the local default branch.
   const fork = git('rev-parse', 'HEAD');
   git('checkout', '-q', '-b', 'feature');
@@ -80,10 +87,14 @@ test('a finished review is remembered per branch, and the next one starts there'
   markReviewed(root, tree);
   assert.equal(lastReviewed(root), tree);
   assert.equal(reviewBase(root), tree);
+  // A reference keeps the snapshot, so git's clean-up never deletes it.
+  assert.equal(git('rev-parse', `refs/herdr/reviewed/${currentBranch(root)}`), tree);
+  git('gc', '--quiet', '--prune=now');
+  assert.equal(lastReviewed(root), tree);
   // Another branch has its own memory.
   git('checkout', '-q', '-b', 'other');
   assert.equal(lastReviewed(root), null);
-  // A snapshot git no longer has counts as none.
-  markReviewed(root, 'f'.repeat(40));
+  // A snapshot git does not have is never recorded.
+  assert.throws(() => markReviewed(root, 'f'.repeat(40)));
   assert.equal(lastReviewed(root), null);
 });
