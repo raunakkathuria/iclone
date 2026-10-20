@@ -37,7 +37,8 @@ import { NOT_REVIEWED, changedBetween, currentBranch, git, gitRoot, markReviewed
 
 // Shell tool names: Claude Code and Codex "Bash", Cursor "Shell", Kiro V2 "shell", Kiro V3 "execute_bash".
 const SHELL_TOOLS = new Set(['Bash', 'Shell', 'shell', 'execute_bash']);
-// Only where a command starts, so "gh pr create" inside a quote or a comment does not count.
+// Only where a command starts, so "gh pr create" in a comment does not count. Quoted text is
+// blanked first (see withoutQuotes), so it does not count either.
 const GH_PR_CREATE = /(?:^|[;&|(]|\n)\s*gh\s+pr\s+create\b/;
 const HERDR_REVIEW = /(?:^|[;&|(]|\n)\s*herdr-review\b/;
 // Every coding tool may write here, even in a sandbox. PR_HANDOFF_FINDINGS_DIR is for tests.
@@ -145,12 +146,31 @@ function shellCommand(event) {
   return SHELL_TOOLS.has(event?.tool_name) && typeof command === 'string' ? withoutHeredocs(command) : null;
 }
 
+// The command with the text inside each quoted string removed, quotes kept. A quoted argument
+// is never a command: in grep "a\|herdr-review" the "|" is part of the pattern.
+export function withoutQuotes(command) {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote) {
+      if (c === '\\' && quote === '"') i++;
+      else if (c === quote) { quote = null; out += c; }
+      continue;
+    }
+    if (c === '\\') { out += c + (command[i + 1] ?? ''); i++; continue; }
+    if (c === "'" || c === '"') quote = c;
+    out += c;
+  }
+  return out;
+}
+
 export function isPrCreate(event) {
-  return GH_PR_CREATE.test(shellCommand(event) ?? '');
+  return GH_PR_CREATE.test(withoutQuotes(shellCommand(event) ?? ''));
 }
 
 export function isReviewRequest(event) {
-  return HERDR_REVIEW.test(shellCommand(event) ?? '');
+  return HERDR_REVIEW.test(withoutQuotes(shellCommand(event) ?? ''));
 }
 
 // The folder the command ran in. Cursor sends an empty cwd, so fall back to its tool input and
@@ -502,7 +522,11 @@ async function handBack(job, result, reviewerTool) {
     return log(`${job.key}: coder ${pane} has no agent; not handed back`);
   }
   const who = `${current.agent} coder`;
-  if (!(await waitReady(pane, who, 180 * MINUTE))) return log(`${job.key}: coder ${pane} busy for 3 hours; not handed back`);
+  if (!(await waitReady(pane, who, 180 * MINUTE))) {
+    // Only logging this lost a whole review once: Guru is told where the findings are.
+    notify(`Review done: ${job.title}`, `The coder in pane ${pane} was busy for 3 hours, so it was not told. The findings: ${result}`);
+    return log(`${job.key}: coder ${pane} busy for 3 hours; not handed back`);
+  }
   if (!(await sendPrompt(pane, job.fix(result, reviewerTool)))) {
     notify(`${who} did not start`, `Ask pane ${pane} to fix the review yourself: ${result}`);
     return log(`${job.key}: fix prompt to ${pane} stalled 3 times`);

@@ -479,6 +479,12 @@ test('isReviewRequest matches herdr-review where a command starts', () => {
   assert.equal(isReviewRequest({ tool_name: 'shell', tool_input: { command: 'cd app && herdr-review' } }), true);
   assert.equal(isReviewRequest({ tool_name: 'Shell', tool_input: { command: 'echo "run herdr-review later"' } }), false);
   assert.equal(isReviewRequest({ tool_name: 'Write', tool_input: { command: 'herdr-review' } }), false);
+  // A "|" or "(" inside a quoted argument is part of the argument, not a new command.
+  assert.equal(isReviewRequest({ tool_name: 'Bash', tool_input: { command: 'grep "w14:p1\\|herdr-review in" log' } }), false);
+  assert.equal(isReviewRequest({ tool_name: 'Bash', tool_input: { command: "grep -E '(herdr-review sends|x)' f" } }), false);
+  assert.equal(isReviewRequest({ tool_name: 'Bash', tool_input: { command: 'cd "my dir" && echo "it\'s" && herdr-review' } }), true);
+  assert.equal(isPrCreate({ tool_name: 'Bash', tool_input: { command: 'gh pr create --title "a|b"' } }), true);
+  assert.equal(isPrCreate({ tool_name: 'Bash', tool_input: { command: 'echo "x && gh pr create"' } }), false);
   assert.equal(commandDir('cd app && herdr-review', '/repo', /(?:^|[;&|(]|\n)\s*herdr-review\b/), '/repo/app');
 });
 
