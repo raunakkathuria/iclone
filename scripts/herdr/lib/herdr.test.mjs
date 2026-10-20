@@ -117,6 +117,18 @@ test('tryLock lets one run in and frees the lock on release', () => {
   again();
 });
 
+test('tryLock takes over a lock whose owner has died', () => {
+  // A process that has finished: its lock is left over from a crash.
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  mkdirSync(join(STATE, 'locks', 'dead-lock'), { recursive: true });
+  writeFileSync(join(STATE, 'locks', 'dead-lock', 'owner'), String(dead));
+  const release = tryLock('dead-lock');
+  assert.ok(release);
+  // A lock held by a live process is not taken.
+  assert.equal(tryLock('dead-lock'), null);
+  release();
+});
+
 test('a new workspace gets a reviewer pane to the right, and both tools start', async t => {
   const herdr = fakeHerdr(t, [shell('w1:p1')]);
   assert.deepEqual(await ensureLayout('w1', CONFIG), { builder: 'w1:p1', reviewer: 'w1:p2', started: ['builder', 'reviewer'] });
