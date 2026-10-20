@@ -644,8 +644,8 @@ async function localWorker(tool, event) {
   const tree = snapshot(root);
   const base = reviewBase(root, branch);
   if (!changedBetween(root, base, tree)) {
-    await nothingNew(event, root);
-    return log(`skip herdr-review in ${root}: nothing new since ${base}`);
+    log(`skip herdr-review in ${root}: nothing new since ${base}`);
+    return nothingNew(event, root);
   }
   const onDone = remember(root, tree, branch);
   const pr = pushedPr(root);
