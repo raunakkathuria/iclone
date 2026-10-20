@@ -12,3 +12,6 @@ auth-profiles.json
 *.swp
 .idea/
 .vscode/
+
+# A minion team's record (team-up). It belongs to one run, not to the template.
+.team/

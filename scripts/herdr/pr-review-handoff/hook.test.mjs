@@ -16,10 +16,10 @@ const HOOK = fileURLToPath(new URL('./hook.mjs', import.meta.url));
 const FAKE_HERDR = fileURLToPath(new URL('../test/fake-herdr.cjs', import.meta.url));
 const URL_ = 'https://github.com/example/repro/pull/1';
 
-// A coder pane running codex and a reviewer pane running claude, in workspace wV.
+// A builder pane running codex and a reviewer pane running claude, in workspace wV.
 const PANES = () => [
-  { pane_id: 'wV:p1', workspace_id: 'wV', tab_id: 'wV:t1', label: 'coder', agent: 'codex', agent_session: { kind: 'id', value: 'builder-session' }, cwd: '/repo' },
-  { pane_id: 'wV:p2', workspace_id: 'wV', tab_id: 'wV:t1', label: 'reviewer', agent: 'claude', cwd: '/repo' },
+  { pane_id: 'wV:p1', workspace_id: 'wV', tab_id: 'wV:t1', label: 'builder-minion', agent: 'codex', agent_session: { kind: 'id', value: 'builder-session' }, cwd: '/repo' },
+  { pane_id: 'wV:p2', workspace_id: 'wV', tab_id: 'wV:t1', label: 'reviewer-minion', agent: 'claude', cwd: '/repo' },
 ];
 
 // Runs the worker against a fake herdr and a fake gh. Returns the log, and the herdr calls.
@@ -49,9 +49,10 @@ else { const n=fs.existsSync(${JSON.stringify(apiFile)})?Number(fs.readFileSync(
     notified: (text) => herdr().calls.some((a) => a[0] === 'notification' && a.some((x) => x.includes(text))),
     claimed: () => existsSync(join(state, 'handed-off')) && readdirSync(join(state, 'handed-off')).length > 0,
     starts: () => existsSync(join(state, 'review-starts')) ? readdirSync(join(state, 'review-starts')).flatMap((f) => JSON.parse(readFileSync(join(state, 'review-starts', f), 'utf8'))) : [],
-    // kind 'pr' runs the gh pr create worker; 'local' runs the herdr-review worker.
-    run(mode, { tool = 'codex', panes = PANES(), current = 'wV:p1', kind = 'pr', event = {}, keepHerdr = false } = {}) {
-      if (!keepHerdr || !existsSync(herdrState)) writeFileSync(herdrState, JSON.stringify({ mode, current, panes, next: 3, calls: [] }));
+    // kind 'pr' runs the gh pr create worker; 'local' runs the herdr-review worker. workspaces
+    // gives workspace labels, for example a team's "<folder> minions"; env adds variables.
+    run(mode, { tool = 'codex', panes = PANES(), current = 'wV:p1', kind = 'pr', event = {}, keepHerdr = false, workspaces = [], env = {} } = {}) {
+      if (!keepHerdr || !existsSync(herdrState)) writeFileSync(herdrState, JSON.stringify({ mode, current, panes, next: 3, calls: [], workspaces }));
       else writeFileSync(herdrState, JSON.stringify({ ...herdr(), mode }));
       rmSync(apiFile, { force: true });
       const eventFile = join(dir, 'event.json');
@@ -63,7 +64,8 @@ else { const n=fs.existsSync(${JSON.stringify(apiFile)})?Number(fs.readFileSync(
         env: {
           ...process.env, HERDR_ENV: '1', HERDR_SOCKET_PATH: '/test.sock', HERDR_PANE_ID: current, HERDR_WORKSPACE_ID: current.split(':')[0],
           PR_REVIEWER: '', PR_REVIEW_MAX_PER_HOUR: '', PR_HANDOFF_STATE_DIR: state, PR_HANDOFF_FINDINGS_DIR: findings,
-          HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, PATH: `${bin}:${process.env.PATH}`,
+          PR_HANDOFF_SETTLE_MS: '2000', HERDR_BIN_PATH: FAKE_HERDR, FAKE_HERDR_STATE: herdrState, PATH: `${bin}:${process.env.PATH}`,
+          ...env,
         },
         encoding: 'utf8', timeout: 40000,
       });
@@ -99,10 +101,20 @@ test('a stale caller pane falls back to the pane with the same agent session', t
   assert.match(log, /review done:/);
 });
 
-test('without a session match, the pane labelled coder is the coder', t => {
+test('without a session match, the builder pane is the coder', t => {
   const fixture = workerFixture(t);
   const log = fixture.run('missing', { event: { session_id: undefined } });
   assert.match(log, /built by codex in wV:p1/);
+});
+
+test('the old coder and reviewer labels still work', t => {
+  const fixture = workerFixture(t);
+  const panes = PANES();
+  panes[0].label = 'coder';
+  panes[1].label = 'reviewer';
+  const log = fixture.run('ok', { panes });
+  assert.match(log, /review by claude in wV:p2/);
+  assert.match(log, /review done:/);
 });
 
 test('a moved coder uses the pane and workspace resolved by Herdr', t => {
@@ -119,6 +131,15 @@ test('a review request from the reviewer pane is skipped', t => {
   const log = fixture.run('ok', { current: 'wV:p2', event: { session_id: undefined } });
   assert.match(log, /the request came from reviewer pane wV:p2/);
   assert.ok(fixture.notified('PR from the reviewer pane'));
+  assert.equal(fixture.claimed(), false);
+  assert.equal(fixture.prompts().length, 0);
+});
+
+test('a review asked for from the guru pane is skipped', t => {
+  const fixture = workerFixture(t);
+  const panes = [...PANES(), { pane_id: 'wV:p3', workspace_id: 'wV', tab_id: 'wV:t1', label: 'guru', cwd: '/repo' }];
+  const log = fixture.run('ok', { panes, current: 'wV:p3', event: { session_id: undefined } });
+  assert.match(log, /the request came from guru pane wV:p3/);
   assert.equal(fixture.claimed(), false);
   assert.equal(fixture.prompts().length, 0);
 });
@@ -147,7 +168,7 @@ test('a workspace without a reviewer pane gets one, with the other tool', t => {
   assert.match(log, /review by claude in wV:p3/);
   const split = fixture.calls().find((a) => a[0] === 'pane' && a[1] === 'split');
   assert.deepEqual(split.slice(split.indexOf('--pane'), split.indexOf('--pane') + 2), ['--pane', 'wV:p1']);
-  assert.equal(fixture.panes().find((p) => p.pane_id === 'wV:p3').label, 'reviewer');
+  assert.equal(fixture.panes().find((p) => p.pane_id === 'wV:p3').label, 'reviewer-minion');
   // A new reviewer has an empty context already.
   assert.ok(!fixture.prompts('wV:p3').includes('/clear'));
 });
@@ -274,6 +295,68 @@ test('a reviewer that looks idle for a moment mid-review is not cut short', t =>
   assert.equal(fixture.prompts('wV:p2').filter((p) => p.startsWith('Review the local changes')).length, 1);
 });
 
+test('a reviewer that looks ready while it still works gets more time, not a second prompt', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  // Every ready reviewer counts as past the lost-prompt window, as in a long review.
+  const log = fixture.run('late-findings', { kind: 'local', event: { cwd: repo }, env: { PR_HANDOFF_LOST_PROMPT_MS: '1' } });
+  assert.match(log, /review done:/);
+  assert.doesNotMatch(log, /wrote no review|sending the prompt again/);
+  assert.equal(fixture.prompts('wV:p2').filter((p) => p.startsWith('Review the local changes')).length, 1);
+  assert.ok(fixture.prompts('wV:p1').some((p) => p.startsWith('claude reviewed your local changes')));
+});
+
+test('a reviewer pane that resumes its session is waited for, and still cleared', t => {
+  const fixture = workerFixture(t);
+  const repo = gitRepo(fixture.dir);
+  const panes = PANES();
+  delete panes[1].agent;
+  panes[1].agent_session = { agent: 'claude', value: 'reviewer-session' };
+  const log = fixture.run('resume', { kind: 'local', panes, event: { cwd: repo } });
+  assert.match(log, /review done:/);
+  assert.ok(!fixture.calls().some((a) => a[0] === 'agent' && a[1] === 'start'));
+  // A resumed tool keeps its old context, so the review clears it first.
+  assert.ok(fixture.prompts('wV:p2').includes('/clear'));
+});
+
+// A repository whose branch has one commit since origin/main, and one uncommitted change.
+function branchRepo(dir) {
+  const repo = gitRepo(dir);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  const base = git('rev-parse', 'HEAD');
+  git('update-ref', 'refs/remotes/origin/main', base);
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'second');
+  writeFileSync(join(repo, 'a.txt'), 'three\n');
+  return { repo, base };
+}
+
+test('a review covers the branch, but in a minion team only the uncommitted task', t => {
+  const pair = workerFixture(t);
+  const one = branchRepo(pair.dir);
+  pair.run('ok', { kind: 'local', event: { cwd: one.repo } });
+  const pairReview = pair.prompts('wV:p2').find((p) => p.startsWith('Review the local changes'));
+  assert.ok(pairReview.includes(`diff ${one.base}`), pairReview);
+  assert.doesNotMatch(pairReview, /handoff file/);
+
+  const team = workerFixture(t);
+  const two = branchRepo(team.dir);
+  team.run('ok', { kind: 'local', event: { cwd: two.repo }, workspaces: [{ workspace_id: 'wV', label: 'repo minions' }] });
+  const teamReview = team.prompts('wV:p2').find((p) => p.startsWith('Review the local changes'));
+  assert.ok(teamReview.includes(`git -C ${realpathSync(two.repo)} diff HEAD`), teamReview);
+  // The builder's notes for the reviewer are in the task's handoff file.
+  assert.match(teamReview, /\.team\/handoffs\/ of the task in REVIEW/);
+});
+
+test('in a minion team, herdr-review with nothing uncommitted tells the builder', t => {
+  const fixture = workerFixture(t);
+  const { repo } = branchRepo(fixture.dir);
+  execFileSync('git', ['-C', repo, 'checkout', '--', '.']);
+  const log = fixture.run('ok', { kind: 'local', event: { cwd: repo }, workspaces: [{ workspace_id: 'wV', label: 'repo minions' }] });
+  assert.match(log, /no changes/);
+  assert.equal(fixture.prompts('wV:p2').length, 0);
+  assert.match(fixture.prompts('wV:p1').at(-1), /^herdr-review found nothing to review in .*commit a task only after qa-minion passes it/);
+});
+
 test('a PR made after cd names that checkout in the review prompt', t => {
   const fixture = workerFixture(t);
   const repo = gitRepo(fixture.dir);
@@ -337,13 +420,15 @@ function runSession(t, tool, label, env = {}) {
 }
 
 test('the session hook gives the coder the rule, in the format of each tool', t => {
-  const claude = JSON.parse(runSession(t, 'claude', 'coder'));
+  const claude = JSON.parse(runSession(t, 'claude', 'builder-minion'));
   assert.equal(claude.hookSpecificOutput.hookEventName, 'SessionStart');
   assert.equal(claude.hookSpecificOutput.additionalContext, CODER_RULE);
   assert.equal(runSession(t, 'kiro', null), `${CODER_RULE}\n`);
+  assert.ok(runSession(t, 'claude', 'coder'));
   // Never in the reviewer pane, and never outside Herdr.
+  assert.equal(runSession(t, 'claude', 'reviewer-minion'), '');
   assert.equal(runSession(t, 'claude', 'reviewer'), '');
-  assert.equal(runSession(t, 'claude', 'coder', { HERDR_ENV: '' }), '');
+  assert.equal(runSession(t, 'claude', 'builder-minion', { HERDR_ENV: '' }), '');
 });
 
 test('sessionOutput and CODER_RULE stay one line each', () => {

@@ -44,7 +44,7 @@ iclone/
   memory/                  # what it learns and keeps
   scripts/
     setup.sh               # copy skills into whichever tool(s) you use
-    herdr/                 # coder + reviewer panes in Herdr, with review handoff  (optional)
+    herdr/                 # minions in Herdr: a builder and a reviewer, or a team  (optional)
   .github/workflows/
     process-inbox.yml      # run process-inbox on a schedule, open a PR to review
 ```
@@ -98,11 +98,13 @@ that sync.
 is published automatically. Wire your AI tool's CLI and API key into the workflow's one step to turn
 it on. (A scheduler like OpenClaw's can do the same job if you'd rather not use Actions.)
 
-## A coder and a reviewer in every Herdr workspace (optional)
+## Minions in every Herdr workspace (optional)
 
-`scripts/herdr/` sets up [Herdr](https://herdr.dev) so that every workspace has a coder pane and a
-reviewer pane, each running a coding agent: Claude Code, Codex, Cursor or Kiro. When the coder opens
-a pull request, or finishes local work, the reviewer reviews it. The coder then fixes the findings.
+`scripts/herdr/` sets up [Herdr](https://herdr.dev) so that every workspace has two minions: a
+`builder-minion` that codes and a `reviewer-minion`, each running a coding agent: Claude Code, Codex,
+Cursor or Kiro. When the builder opens a pull request, or finishes local work, the reviewer reviews
+it. The builder then fixes the findings. For bigger work, `team-up` adds a product minion and a QA
+minion, with you as Guru, the boss.
 
 ```bash
 ./scripts/herdr/install.sh
